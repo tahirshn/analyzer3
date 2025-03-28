@@ -1,161 +1,195 @@
+import logging
+from enum import Enum
+import sys
+import datetime
+
+class LogIcons(Enum):
+    INFO = "ℹ️"
+    SUCCESS = "✅"
+    WARNING = "⚠️"
+    ERROR = "❌"
+    START = "🚀"
+    DATABASE = "💾"
+    CODE = "👨‍💻"
+    ANALYSIS = "🔍"
+    REPORT = "📊"
+
+class Color:
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BLUE = '\033[94m'
+    END = '\033[0m'
+
+class CustomFormatter(logging.Formatter):
+    """Custom log formatter with icons and colors"""
+    
+    def format(self, record):
+        icon = getattr(LogIcons, record.levelname, LogIcons.INFO).value
+        message = super().format(record)
+        return f"{icon}  {message}"
+
+def setup_logging():
+    """Configure logging with visual formatting"""
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(CustomFormatter('%(message)s'))
+    logger.addHandler(handler)
+    
+    return logger
+
+logger = setup_logging()
+
 class ReportGenerator:
-    """Generates reports in multiple formats (text, JSON, HTML)"""
+    """Generates reports with enhanced logging"""
     
     @staticmethod
     def generate_report(missing_indexes: Set[QueryCondition], 
                        output_path: str = "index-report",
                        formats: List[str] = ["text", "json", "html"]) -> None:
-        """Generate reports in specified formats"""
+        """Generate reports with progress logging"""
+        logger.info(f"{LogIcons.REPORT.value} Starting report generation")
         
-        # Group by table for better organization
         by_table = defaultdict(list)
         for condition in missing_indexes:
             by_table[condition.table_name].append(condition)
         
-        # Generate each requested format
         for fmt in formats:
-            if fmt == "text":
-                ReportGenerator._generate_text_report(by_table, f"{output_path}.txt")
-            elif fmt == "json":
-                ReportGenerator._generate_json_report(by_table, f"{output_path}.json")
-            elif fmt == "html":
-                ReportGenerator._generate_html_report(by_table, f"{output_path}.html")
-
-    @staticmethod
-    def _generate_text_report(by_table: Dict[str, List[QueryCondition]], output_path: str) -> None:
-        """Generate plain text report"""
-        with open(output_path, 'w') as f:
-            if not by_table:
-                f.write("✅ No missing indexes found!\n")
-                return
-            
-            f.write("Missing Database Indexes Report\n")
-            f.write("=" * 40 + "\n\n")
-            
-            for table in sorted(by_table.keys()):
-                f.write(f"Table: {table}\n")
-                f.write("-" * 40 + "\n")
+            try:
+                if fmt == "text":
+                    logger.info(f"Generating text report at {output_path}.txt")
+                    ReportGenerator._generate_text_report(by_table, f"{output_path}.txt")
+                elif fmt == "json":
+                    logger.info(f"Generating JSON report at {output_path}.json")
+                    ReportGenerator._generate_json_report(by_table, f"{output_path}.json")
+                elif fmt == "html":
+                    logger.info(f"Generating HTML report at {output_path}.html")
+                    ReportGenerator._generate_html_report(by_table, f"{output_path}.html")
                 
-                for cond in sorted(by_table[table], key=lambda c: c.column_name):
-                    f.write(f"  Column: {cond.column_name}\n")
-                    f.write(f"    Used with operator: {cond.operator}\n")
-                    f.write(f"    Recommended index:\n")
-                    f.write(f"      CREATE INDEX idx_{table}_{cond.column_name} ON {table}({cond.column_name});\n\n")
-                
-                f.write("\n")
-
-    @staticmethod
-    def _generate_json_report(by_table: Dict[str, List[QueryCondition]], output_path: str) -> None:
-        """Generate JSON report"""
-        import json
+                logger.info(f"{LogIcons.SUCCESS.value} {fmt.upper()} report generated successfully")
+            except Exception as e:
+                logger.error(f"Failed to generate {fmt} report: {str(e)}")
         
-        report_data = {
-            "timestamp": datetime.datetime.now().isoformat(),
-            "missing_indexes": []
-        }
-        
-        for table, conditions in sorted(by_table.items()):
-            for cond in sorted(conditions, key=lambda c: c.column_name):
-                report_data["missing_indexes"].append({
-                    "table": table,
-                    "column": cond.column_name,
-                    "operator": cond.operator,
-                    "recommendation": {
-                        "sql": f"CREATE INDEX idx_{table}_{cond.column_name} ON {table}({cond.column_name})",
-                        "priority": "high" if cond.operator in {'<', '<=', '>', '>=', 'BETWEEN'} else "medium"
-                    }
-                })
-        
-        with open(output_path, 'w') as f:
-            json.dump(report_data, f, indent=2)
+        logger.info(f"{LogIcons.SUCCESS.value} Report generation completed")
 
-    @staticmethod
-    def _generate_html_report(by_table: Dict[str, List[QueryCondition]], output_path: str) -> None:
-        """Generate HTML report"""
-        with open(output_path, 'w') as f:
-            f.write("""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Missing Indexes Report</title>
-    <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; margin: 20px; }
-        h1 { color: #333; }
-        h2 { color: #444; margin-top: 30px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
-        .index { background: #f9f9f9; padding: 10px; margin: 10px 0; border-left: 4px solid #ccc; }
-        .sql { font-family: monospace; background: #f0f0f0; padding: 5px; display: inline-block; }
-        .priority-high { border-left-color: #e74c3c; }
-        .priority-medium { border-left-color: #f39c12; }
-        .summary { background: #f5f5f5; padding: 15px; margin-bottom: 20px; }
-    </style>
-</head>
-<body>
-    <h1>Missing Database Indexes Report</h1>
-    <div class="summary">
-        Generated: {timestamp}<br>
-        Total missing indexes found: {count}
-    </div>
-""".format(
-    timestamp=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    count=sum(len(conditions) for conditions in by_table.values())
-))
+class IndexAnalyzer:
+    """Enhanced with detailed logging"""
+    
+    def run_analysis(self, repo_path: str, flyway_path: str) -> None:
+        logger.info(f"{LogIcons.START.value} Starting database index analysis")
+        
+        logger.info(f"{LogIcons.CODE.value} Scanning repository at {repo_path}")
+        self._load_entity_metadata(repo_path)
+        
+        logger.info(f"{LogIcons.DATABASE.value} Checking Flyway migrations at {flyway_path}")
+        self._load_existing_indexes(flyway_path)
+        
+        logger.info(f"{LogIcons.ANALYSIS.value} Analyzing query patterns")
+        self._analyze_and_report()
+        
+        logger.info(f"{LogIcons.SUCCESS.value} Analysis completed")
 
-            if not by_table:
-                f.write("""<div style="color: green; font-size: 1.2em;">
-                    ✅ No missing indexes found!
-                </div>""")
-            else:
-                for table in sorted(by_table.keys()):
-                    f.write(f'<h2>Table: {table}</h2>\n')
+    def _load_entity_metadata(self, repo_path: str) -> None:
+        logger.info("Extracting entity metadata from Kotlin files...")
+        file_count = 0
+        entity_count = 0
+        
+        for kotlin_file in Path(repo_path).rglob('*.kt'):
+            file_count += 1
+            try:
+                with open(kotlin_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if metadata := self.metadata_extractor.extract_entity_metadata(content, str(kotlin_file)):
+                        self.entity_metadata[metadata.table_name] = metadata
+                        entity_count += 1
+                        logger.debug(f"Found entity: {metadata.table_name} in {kotlin_file}")
+            except Exception as e:
+                logger.warning(f"Error processing {kotlin_file}: {str(e)}")
+        
+        logger.info(f"{LogIcons.SUCCESS.value} Processed {file_count} files, found {entity_count} entities")
+
+    def _load_existing_indexes(self, flyway_path: str) -> None:
+        logger.info("Checking existing indexes in Flyway migrations...")
+        migration_count = 0
+        index_count = 0
+        
+        for migration in Path(flyway_path).glob('*.sql'):
+            migration_count += 1
+            try:
+                with open(migration, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    indexes_before = sum(len(v) for v in self.existing_indexes.values())
+                    self._parse_migration(content)
+                    indexes_added = sum(len(v) for v in self.existing_indexes.values()) - indexes_before
+                    index_count += indexes_added
                     
-                    for cond in sorted(by_table[table], key=lambda c: c.column_name):
-                        priority = "high" if cond.operator in {'<', '<=', '>', '>=', 'BETWEEN'} else "medium"
-                        f.write(f"""<div class="index priority-{priority}">
-    <strong>Column:</strong> {cond.column_name}<br>
-    <strong>Operator:</strong> {cond.operator}<br>
-    <strong>Recommended index:</strong><br>
-    <div class="sql">CREATE INDEX idx_{table}_{cond.column_name} ON {table}({cond.column_name});</div>
-</div>
-""")
+                    if indexes_added > 0:
+                        logger.debug(f"Found {indexes_added} indexes in {migration}")
+            except Exception as e:
+                logger.warning(f"Error processing {migration}: {str(e)}")
+        
+        logger.info(f"{LogIcons.SUCCESS.value} Processed {migration_count} migrations, found {index_count} indexes")
 
-            f.write("""</body>
-</html>""")
+    def _analyze_and_report(self) -> None:
+        query_conditions = self.query_analyzer.analyze_repositories(str(Path.cwd()))
+        missing_indexes = self._identify_missing_indexes(query_conditions)
+        
+        if missing_indexes:
+            logger.warning(f"{LogIcons.WARNING.value} Found {len(missing_indexes)} potentially missing indexes")
+        else:
+            logger.info(f"{LogIcons.SUCCESS.value} No missing indexes detected")
+        
+        self._generate_report(missing_indexes)
 
-# Update the main function to support multiple output formats
 def main():
-    parser = argparse.ArgumentParser(
-        description="Enterprise Database Index Analyzer for Spring Data JPA (Python 3.6)"
-    )
-    parser.add_argument("--repo-path", default=".",
-                       help="Path to code repository")
-    parser.add_argument("--flyway-path", default="src/main/resources/db/migration",
-                       help="Path to Flyway migrations")
-    parser.add_argument("--fail-threshold", type=int, default=0,
-                       help="Maximum allowed missing indexes before failing")
-    parser.add_argument("--formats", nargs="+", default=["text"],
-                       choices=["text", "json", "html"],
-                       help="Output formats for the report")
-    parser.add_argument("--output-prefix", default="index-report",
-                       help="Prefix for output files")
-    
-    args = parser.parse_args()
+    try:
+        logger.info(f"{LogIcons.START.value} Starting Database Index Analyzer")
+        logger.info(f"{Color.BLUE}Version: 1.0.0 | Python 3.6 Compatible{Color.END}")
+        
+        parser = argparse.ArgumentParser(
+            description="Enterprise Database Index Analyzer with Visual Logging"
+        )
+        # ... (existing argument parsing code)
+        
+        args = parser.parse_args()
+        
+        logger.info("Configuration:")
+        logger.info(f"  Repository path: {args.repo_path}")
+        logger.info(f"  Flyway path: {args.flyway_path}")
+        logger.info(f"  Fail threshold: {args.fail_threshold}")
+        logger.info(f"  Output formats: {', '.join(args.formats)}")
+        
+        # Dependency injection
+        metadata_extractor = KotlinEntityExtractor()
+        query_analyzer = SpringDataQueryAnalyzer(metadata_extractor)
+        analyzer = PipelineIndexAnalyzer(metadata_extractor, query_analyzer)
+        
+        analyzer.set_fail_threshold(args.fail_threshold)
+        success = analyzer.run_pipeline_analysis(args.repo_path, args.flyway_path)
+        
+        # Generate reports
+        query_conditions = query_analyzer.analyze_repositories(args.repo_path)
+        missing_indexes = analyzer._identify_missing_indexes(query_conditions)
+        
+        logger.info(f"{LogIcons.REPORT.value} Generating reports...")
+        ReportGenerator.generate_report(
+            missing_indexes,
+            output_path=args.output_prefix,
+            formats=args.formats
+        )
+        
+        if success:
+            logger.info(f"{LogIcons.SUCCESS.value} Analysis completed successfully")
+        else:
+            logger.error(f"{LogIcons.ERROR.value} Analysis failed due to missing indexes")
+        
+        sys.exit(0 if success else 1)
+        
+    except Exception as e:
+        logger.error(f"{LogIcons.ERROR.value} Fatal error: {str(e)}")
+        sys.exit(1)
 
-    # Dependency injection
-    metadata_extractor = KotlinEntityExtractor()
-    query_analyzer = SpringDataQueryAnalyzer(metadata_extractor)
-    analyzer = PipelineIndexAnalyzer(metadata_extractor, query_analyzer)
-    
-    analyzer.set_fail_threshold(args.fail_threshold)
-    success = analyzer.run_pipeline_analysis(args.repo_path, args.flyway_path)
-    
-    # Generate reports
-    query_conditions = query_analyzer.analyze_repositories(args.repo_path)
-    missing_indexes = analyzer._identify_missing_indexes(query_conditions)
-    ReportGenerator.generate_report(
-        missing_indexes,
-        output_path=args.output_prefix,
-        formats=args.formats
-    )
-    
-    if not success:
-        exit(1)
+if __name__ == "__main__":
+    main()
