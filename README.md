@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
 Enterprise-Grade Database Index Analyzer for Spring Data JPA Applications
-Architected with SOLID principles and Clean Architecture
+Python 3.6 Compatible Version
 """
 
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 import re
 import sqlparse
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 import argparse
+import os
 
 # ====================== Domain Models ======================
 @dataclass(frozen=True)
@@ -51,7 +53,7 @@ class QueryAnalyzer(ABC):
 
 # ====================== Concrete Implementations ======================
 class KotlinEntityExtractor(MetadataExtractor):
-    """Extracts metadata from Kotlin entity classes following SOLID principles"""
+    """Extracts metadata from Kotlin entity classes"""
     
     def extract_entity_metadata(self, file_content: str, file_path: str) -> Optional[EntityMetadata]:
         if '@Entity' not in file_content:
@@ -76,7 +78,6 @@ class KotlinEntityExtractor(MetadataExtractor):
         return match.group(1) if match else None
 
     def _extract_table_name(self, content: str, class_name: str) -> str:
-        # First try to get explicit table name
         table_match = re.search(
             r'@Table\s*\(\s*name\s*=\s*["\']([^"\']+)["\']',
             content,
@@ -84,8 +85,6 @@ class KotlinEntityExtractor(MetadataExtractor):
         )
         if table_match:
             return table_match.group(1).lower()
-        
-        # Fallback to snake_case class name
         return self._camel_to_snake(class_name)
 
     def _extract_fields(self, content: str, class_name: str) -> Dict[str, EntityField]:
@@ -99,7 +98,6 @@ class KotlinEntityExtractor(MetadataExtractor):
             prop_name = prop_match.group(1)
             full_match = prop_match.group(0)
             
-            # Skip OneToMany relationships
             if '@OneToMany' in full_match:
                 continue
                 
@@ -140,7 +138,7 @@ class KotlinEntityExtractor(MetadataExtractor):
         return re.sub('([a-z0-9])([A-Z])', r'\1_\2', name).lower()
 
 class SpringDataQueryAnalyzer(QueryAnalyzer):
-    """Analyzes Spring Data repositories with comprehensive query support"""
+    """Analyzes Spring Data repositories"""
     
     def __init__(self, metadata_extractor: MetadataExtractor):
         self.metadata_extractor = metadata_extractor
@@ -186,27 +184,94 @@ class SpringDataQueryAnalyzer(QueryAnalyzer):
             content,
             re.DOTALL
         ):
-            conditions.update(self._parse_jpql_query(query_match.group(1), file_path))
+            query = query_match.group(1)
+            if 'select' in query.lower():
+                conditions.update(self._parse_jpql_query(query, file_path))
+            else:
+                conditions.update(self._parse_sql_query(query, file_path))
         
         return conditions
 
     def _parse_query_method(self, method_body: str, file_path: str) -> Set[QueryCondition]:
-        # Implementation of method name parsing
-        pass
+        conditions = set()
+        parts = re.findall('([A-Z][a-z]+)', method_body)
+        
+        if not parts:
+            return conditions
+            
+        # Simple implementation - would need expansion for real use
+        table_name = self._guess_table_name(file_path)
+        field_name = parts[0].lower()
+        
+        if len(parts) > 1:
+            operator = self.jpa_keywords.get(parts[1], '=')
+        else:
+            operator = '='
+        
+        conditions.add(QueryCondition(
+            table_name=table_name,
+            column_name=field_name,
+            operator=operator
+        ))
+        
+        return conditions
 
     def _parse_jpql_query(self, query: str, file_path: str) -> Set[QueryCondition]:
-        # Implementation of JPQL parsing
-        pass
+        # Simplified JPQL parser
+        conditions = set()
+        table_name = self._guess_table_name(file_path)
+        
+        # Look for WHERE conditions
+        where_match = re.search(r'where\s+(.*?)(?:\s+group\s+by|\s+order\s+by|$)', query, re.IGNORECASE)
+        if not where_match:
+            return conditions
+            
+        where_clause = where_match.group(1)
+        
+        # Simple pattern matching for conditions
+        for cond_match in re.finditer(r'(\w+)\s*(=|!=|>|<|>=|<=|like|in)\s*', where_clause, re.IGNORECASE):
+            conditions.add(QueryCondition(
+                table_name=table_name,
+                column_name=cond_match.group(1),
+                operator=cond_match.group(2).upper()
+            ))
+        
+        return conditions
+
+    def _parse_sql_query(self, query: str, file_path: str) -> Set[QueryCondition]:
+        # Parse raw SQL queries
+        conditions = set()
+        try:
+            parsed = sqlparse.parse(query)
+            for stmt in parsed:
+                for token in stmt.tokens:
+                    if isinstance(token, sqlparse.sql.Where):
+                        for identifier in token.get_identifiers():
+                            conditions.add(QueryCondition(
+                                table_name=self._guess_table_name(file_path),
+                                column_name=identifier.get_real_name(),
+                                operator='='  # Default, would need to parse actual operator
+                            ))
+        except Exception:
+            pass
+        return conditions
+
+    def _guess_table_name(self, file_path: str) -> str:
+        # Simple heuristic to guess table name from repository file name
+        filename = Path(file_path).stem
+        if filename.endswith('Repository'):
+            return filename[:-10].lower()
+        return filename.lower()
 
 # ====================== Main Application ======================
 class IndexAnalyzer:
-    """Orchestrates the index analysis process following Clean Architecture"""
+    """Orchestrates the index analysis process"""
     
     def __init__(self, metadata_extractor: MetadataExtractor, query_analyzer: QueryAnalyzer):
         self.metadata_extractor = metadata_extractor
         self.query_analyzer = query_analyzer
-        self.entity_metadata: Dict[str, EntityMetadata] = {}
-        self.existing_indexes: Dict[str, Set[Tuple[str, ...]]] = {}
+        self.entity_metadata = {}  # type: Dict[str, EntityMetadata]
+        self.existing_indexes = defaultdict(set)  # type: Dict[str, Set[Tuple[str, ...]]]
 
     def run_analysis(self, repo_path: str, flyway_path: str) -> None:
         self._load_entity_metadata(repo_path)
@@ -217,7 +282,8 @@ class IndexAnalyzer:
         for kotlin_file in Path(repo_path).rglob('*.kt'):
             with open(kotlin_file, 'r', encoding='utf-8') as f:
                 content = f.read()
-                if metadata := self.metadata_extractor.extract_entity_metadata(content, str(kotlin_file)):
+                metadata = self.metadata_extractor.extract_entity_metadata(content, str(kotlin_file))
+                if metadata:
                     self.entity_metadata[metadata.table_name] = metadata
 
     def _load_existing_indexes(self, flyway_path: str) -> None:
@@ -228,7 +294,27 @@ class IndexAnalyzer:
 
     def _parse_migration(self, content: str) -> None:
         # Parse SQL migrations for existing indexes
-        pass
+        for stmt in sqlparse.parse(content):
+            if not stmt.get_type() == 'CREATE':
+                continue
+                
+            # Look for index creation
+            if 'index' in stmt.value.lower() and 'on' in stmt.value.lower():
+                try:
+                    # Extract table name and columns
+                    parts = stmt.value.split()
+                    on_index = parts.index('on')
+                    table_name = parts[on_index + 1].strip('`"')
+                    
+                    # Find columns in parentheses
+                    cols_start = stmt.value.find('(')
+                    cols_end = stmt.value.find(')')
+                    if cols_start > 0 and cols_end > cols_start:
+                        columns = stmt.value[cols_start+1:cols_end].split(',')
+                        columns = [col.strip(' `"') for col in columns]
+                        self.existing_indexes[table_name].add(tuple(columns))
+                except (ValueError, IndexError):
+                    continue
 
     def _analyze_and_report(self) -> None:
         query_conditions = self.query_analyzer.analyze_repositories(str(Path.cwd()))
@@ -272,65 +358,37 @@ class IndexAnalyzer:
             
         print(f"❌ Found {len(missing_indexes)} missing indexes:")
         for condition in sorted(missing_indexes, key=lambda c: (c.table_name, c.column_name)):
-            self._print_index_recommendation(condition)
-
-    def _print_index_recommendation(self, condition: QueryCondition) -> None:
-        # Detailed recommendation printing
-        pass
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Enterprise Database Index Analyzer for Spring Data JPA"
-    )
-    parser.add_argument("--repo-path", default=".",
-                       help="Path to code repository")
-    parser.add_argument("--flyway-path", default="src/main/resources/db/migration",
-                       help="Path to Flyway migrations")
-    
-    args = parser.parse_args()
-
-    # Dependency injection
-    metadata_extractor = KotlinEntityExtractor()
-    query_analyzer = SpringDataQueryAnalyzer(metadata_extractor)
-    analyzer = IndexAnalyzer(metadata_extractor, query_analyzer)
-    
-    analyzer.run_analysis(args.repo_path, args.flyway_path)
-
-if __name__ == "__main__":
-    main()
-
-# Add to existing analyzer.py
+            print(f"  - Table: {condition.table_name}, Column: {condition.column_name}")
+            print(f"    Used with operator: {condition.operator}")
+            print(f"    Recommended index: CREATE INDEX idx_{condition.table_name}_{condition.column_name} ON {condition.table_name}({condition.column_name});\n")
 
 class PipelineIndexAnalyzer(IndexAnalyzer):
-    """Extended analyzer with pipeline-specific functionality"""
+    """Pipeline-specific analyzer with threshold checking"""
     
     def __init__(self, metadata_extractor: MetadataExtractor, query_analyzer: QueryAnalyzer):
         super().__init__(metadata_extractor, query_analyzer)
         self.fail_threshold = 0  # Default: fail on any missing index
     
-    def set_fail_threshold(self, threshold: int):
+    def set_fail_threshold(self, threshold: int) -> None:
         """Set how many missing indexes are allowed before failing"""
         self.fail_threshold = threshold
     
     def run_pipeline_analysis(self, repo_path: str, flyway_path: str) -> bool:
         """Run analysis and return whether pipeline should pass"""
         self.run_analysis(repo_path, flyway_path)
-        missing_count = len(self._identify_missing_indexes(
-            self.query_analyzer.analyze_repositories(repo_path)
-        ))
+        query_conditions = self.query_analyzer.analyze_repositories(repo_path)
+        missing_count = len(self._identify_missing_indexes(query_conditions))
         
         if missing_count > self.fail_threshold:
-            print(f"🚨 Pipeline failed - {missing_count} missing indexes detected")
+            print(f"🚨 Pipeline failed - {missing_count} missing indexes detected (threshold: {self.fail_threshold})")
             return False
         return True
-
-# Add to existing analyzer.py
 
 class HTMLReporter:
     """Generate HTML reports for pipeline artifacts"""
     
     @staticmethod
-    def generate_report(missing_indexes: Set[QueryCondition], output_path: str = "index-report.html"):
+    def generate_report(missing_indexes: Set[QueryCondition], output_path: str = "index-report.html") -> None:
         with open(output_path, 'w') as f:
             f.write("<html><head><title>Missing Index Report</title></head><body>")
             f.write("<h1>Missing Database Indexes Report</h1>")
@@ -340,14 +398,49 @@ class HTMLReporter:
                 return
             
             # Group by table
-            by_table = {}
+            by_table = defaultdict(list)
             for condition in missing_indexes:
-                by_table.setdefault(condition.table_name, []).append(condition)
+                by_table[condition.table_name].append(condition)
             
-            for table, conditions in sorted(by_table.items()):
+            for table in sorted(by_table.keys()):
                 f.write(f"<h2>Table: {table}</h2><ul>")
-                for cond in sorted(conditions, key=lambda c: c.column_name):
+                for cond in sorted(by_table[table], key=lambda c: c.column_name):
                     f.write(f"<li>Column: {cond.column_name} (used with operator: {cond.operator})</li>")
+                    f.write(f"<pre>CREATE INDEX idx_{table}_{cond.column_name} ON {table}({cond.column_name});</pre>")
                 f.write("</ul>")
             
             f.write("</body></html>")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Enterprise Database Index Analyzer for Spring Data JPA (Python 3.6)"
+    )
+    parser.add_argument("--repo-path", default=".",
+                       help="Path to code repository")
+    parser.add_argument("--flyway-path", default="src/main/resources/db/migration",
+                       help="Path to Flyway migrations")
+    parser.add_argument("--fail-threshold", type=int, default=0,
+                       help="Maximum allowed missing indexes before failing")
+    parser.add_argument("--html-report", action='store_true',
+                       help="Generate HTML report")
+    
+    args = parser.parse_args()
+
+    # Dependency injection
+    metadata_extractor = KotlinEntityExtractor()
+    query_analyzer = SpringDataQueryAnalyzer(metadata_extractor)
+    analyzer = PipelineIndexAnalyzer(metadata_extractor, query_analyzer)
+    
+    analyzer.set_fail_threshold(args.fail_threshold)
+    success = analyzer.run_pipeline_analysis(args.repo_path, args.flyway_path)
+    
+    if args.html_report:
+        query_conditions = query_analyzer.analyze_repositories(args.repo_path)
+        missing_indexes = analyzer._identify_missing_indexes(query_conditions)
+        HTMLReporter.generate_report(missing_indexes)
+    
+    if not success:
+        exit(1)
+
+if __name__ == "__main__":
+    main()
