@@ -1,195 +1,173 @@
-import logging
-from enum import Enum
-import sys
-import datetime
-
-class LogIcons(Enum):
-    INFO = "ℹ️"
-    SUCCESS = "✅"
-    WARNING = "⚠️"
-    ERROR = "❌"
-    START = "🚀"
-    DATABASE = "💾"
-    CODE = "👨‍💻"
-    ANALYSIS = "🔍"
-    REPORT = "📊"
-
-class Color:
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BLUE = '\033[94m'
-    END = '\033[0m'
-
-class CustomFormatter(logging.Formatter):
-    """Custom log formatter with icons and colors"""
+class SpringDataQueryAnalyzer(QueryAnalyzer):
+    # ... (keep existing __init__ and other methods)
     
-    def format(self, record):
-        icon = getattr(LogIcons, record.levelname, LogIcons.INFO).value
-        message = super().format(record)
-        return f"{icon}  {message}"
-
-def setup_logging():
-    """Configure logging with visual formatting"""
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(CustomFormatter('%(message)s'))
-    logger.addHandler(handler)
-    
-    return logger
-
-logger = setup_logging()
-
-class ReportGenerator:
-    """Generates reports with enhanced logging"""
-    
-    @staticmethod
-    def generate_report(missing_indexes: Set[QueryCondition], 
-                       output_path: str = "index-report",
-                       formats: List[str] = ["text", "json", "html"]) -> None:
-        """Generate reports with progress logging"""
-        logger.info(f"{LogIcons.REPORT.value} Starting report generation")
+    def _analyze_repository_file(self, content: str, file_path: str) -> Set[QueryCondition]:
+        """Comprehensively analyze repository file for query conditions"""
+        conditions = set()
         
-        by_table = defaultdict(list)
-        for condition in missing_indexes:
-            by_table[condition.table_name].append(condition)
+        # 1. Analyze derived query methods
+        conditions.update(self._parse_derived_queries(content, file_path))
         
-        for fmt in formats:
-            try:
-                if fmt == "text":
-                    logger.info(f"Generating text report at {output_path}.txt")
-                    ReportGenerator._generate_text_report(by_table, f"{output_path}.txt")
-                elif fmt == "json":
-                    logger.info(f"Generating JSON report at {output_path}.json")
-                    ReportGenerator._generate_json_report(by_table, f"{output_path}.json")
-                elif fmt == "html":
-                    logger.info(f"Generating HTML report at {output_path}.html")
-                    ReportGenerator._generate_html_report(by_table, f"{output_path}.html")
+        # 2. Analyze @Query annotations (both JPQL and native SQL)
+        conditions.update(self._parse_query_annotations(content, file_path))
+        
+        # 3. Analyze custom implementation methods if needed
+        conditions.update(self._parse_custom_impl(content, file_path))
+        
+        return conditions
+
+    def _parse_derived_queries(self, content: str, file_path: str) -> Set[QueryCondition]:
+        """Parse Spring Data derived query methods"""
+        conditions = set()
+        table_name = self._guess_table_name(file_path)
+        
+        # Match method patterns like findByLastNameAndFirstName
+        for method_match in re.finditer(
+            r'fun\s+(?:find|read|get|query|count)(?:[A-Z]\w+)?By([A-Z]\w+)\([^)]*\)',
+            content
+        ):
+            method_body = method_match.group(1)
+            
+            # Split conditions (And/Or)
+            parts = re.split('(And|Or)', method_body)
+            field_ops = []
+            
+            # First part is always a field
+            field_ops.append((parts[0], '='))
+            
+            # Process remaining parts in pairs (connector, field)
+            for i in range(1, len(parts), 2):
+                if i + 1 >= len(parts):
+                    break
+                connector = parts[i]
+                field_part = parts[i + 1]
                 
-                logger.info(f"{LogIcons.SUCCESS.value} {fmt.upper()} report generated successfully")
-            except Exception as e:
-                logger.error(f"Failed to generate {fmt} report: {str(e)}")
+                # Extract operator from field part
+                field_name, operator = self._parse_field_with_operator(field_part)
+                field_ops.append((field_name, operator))
+            
+            # Create conditions for each field
+            for field_name, operator in field_ops:
+                snake_case_field = self._camel_to_snake(field_name)
+                conditions.add(QueryCondition(
+                    table_name=table_name,
+                    column_name=snake_case_field,
+                    operator=operator
+                ))
         
-        logger.info(f"{LogIcons.SUCCESS.value} Report generation completed")
+        return conditions
 
-class IndexAnalyzer:
-    """Enhanced with detailed logging"""
-    
-    def run_analysis(self, repo_path: str, flyway_path: str) -> None:
-        logger.info(f"{LogIcons.START.value} Starting database index analysis")
+    def _parse_field_with_operator(self, field_part: str) -> Tuple[str, str]:
+        """Extract field name and operator from method part"""
+        # Check for operators in the field part
+        for op_pattern, operator in [
+            ('(LessThan|Before)', '<'),
+            ('(LessThanEqual)', '<='),
+            ('(GreaterThan|After)', '>'),
+            ('(GreaterThanEqual)', '>='),
+            ('(Not)', '<>'),
+            ('(Like)', 'LIKE'),
+            ('(In)', 'IN'),
+            ('(Between)', 'BETWEEN'),
+            ('(IsNull|Null)', 'IS NULL'),
+            ('(IsNotNull|NotNull)', 'IS NOT NULL')
+        ]:
+            match = re.search(f'(.+?){op_pattern}', field_part)
+            if match:
+                return match.group(1), operator
         
-        logger.info(f"{LogIcons.CODE.value} Scanning repository at {repo_path}")
-        self._load_entity_metadata(repo_path)
-        
-        logger.info(f"{LogIcons.DATABASE.value} Checking Flyway migrations at {flyway_path}")
-        self._load_existing_indexes(flyway_path)
-        
-        logger.info(f"{LogIcons.ANALYSIS.value} Analyzing query patterns")
-        self._analyze_and_report()
-        
-        logger.info(f"{LogIcons.SUCCESS.value} Analysis completed")
+        # Default to equality if no operator found
+        return field_part, '='
 
-    def _load_entity_metadata(self, repo_path: str) -> None:
-        logger.info("Extracting entity metadata from Kotlin files...")
-        file_count = 0
-        entity_count = 0
+    def _parse_query_annotations(self, content: str, file_path: str) -> Set[QueryCondition]:
+        """Parse both JPQL and native SQL queries from @Query annotations"""
+        conditions = set()
+        table_name = self._guess_table_name(file_path)
         
-        for kotlin_file in Path(repo_path).rglob('*.kt'):
-            file_count += 1
-            try:
-                with open(kotlin_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    if metadata := self.metadata_extractor.extract_entity_metadata(content, str(kotlin_file)):
-                        self.entity_metadata[metadata.table_name] = metadata
-                        entity_count += 1
-                        logger.debug(f"Found entity: {metadata.table_name} in {kotlin_file}")
-            except Exception as e:
-                logger.warning(f"Error processing {kotlin_file}: {str(e)}")
+        for query_match in re.finditer(
+            r'@Query\s*\(\s*value\s*=\s*["\'](.*?)["\']',
+            content,
+            re.DOTALL
+        ):
+            query = query_match.group(1)
+            
+            # Clean up query string
+            query = re.sub(r'[\n\r\t]', ' ', query).strip()
+            
+            if query.lower().startswith('select'):
+                # JPQL/HQL query
+                conditions.update(self._parse_jpql_query(query, table_name))
+            else:
+                # Native SQL query
+                conditions.update(self._parse_sql_query(query, table_name))
         
-        logger.info(f"{LogIcons.SUCCESS.value} Processed {file_count} files, found {entity_count} entities")
+        return conditions
 
-    def _load_existing_indexes(self, flyway_path: str) -> None:
-        logger.info("Checking existing indexes in Flyway migrations...")
-        migration_count = 0
-        index_count = 0
+    def _parse_jpql_query(self, query: str, table_name: str) -> Set[QueryCondition]:
+        """Parse JPQL/HQL query conditions"""
+        conditions = set()
         
-        for migration in Path(flyway_path).glob('*.sql'):
-            migration_count += 1
-            try:
-                with open(migration, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    indexes_before = sum(len(v) for v in self.existing_indexes.values())
-                    self._parse_migration(content)
-                    indexes_added = sum(len(v) for v in self.existing_indexes.values()) - indexes_before
-                    index_count += indexes_added
-                    
-                    if indexes_added > 0:
-                        logger.debug(f"Found {indexes_added} indexes in {migration}")
-            except Exception as e:
-                logger.warning(f"Error processing {migration}: {str(e)}")
-        
-        logger.info(f"{LogIcons.SUCCESS.value} Processed {migration_count} migrations, found {index_count} indexes")
-
-    def _analyze_and_report(self) -> None:
-        query_conditions = self.query_analyzer.analyze_repositories(str(Path.cwd()))
-        missing_indexes = self._identify_missing_indexes(query_conditions)
-        
-        if missing_indexes:
-            logger.warning(f"{LogIcons.WARNING.value} Found {len(missing_indexes)} potentially missing indexes")
-        else:
-            logger.info(f"{LogIcons.SUCCESS.value} No missing indexes detected")
-        
-        self._generate_report(missing_indexes)
-
-def main():
-    try:
-        logger.info(f"{LogIcons.START.value} Starting Database Index Analyzer")
-        logger.info(f"{Color.BLUE}Version: 1.0.0 | Python 3.6 Compatible{Color.END}")
-        
-        parser = argparse.ArgumentParser(
-            description="Enterprise Database Index Analyzer with Visual Logging"
+        # Extract WHERE clause (simplified)
+        where_match = re.search(
+            r'where\s+(.*?)(?:\s+group\s+by|\s+order\s+by|\s*$)', 
+            query, 
+            re.IGNORECASE
         )
-        # ... (existing argument parsing code)
+        if not where_match:
+            return conditions
+            
+        where_clause = where_match.group(1)
         
-        args = parser.parse_args()
+        # Parse conditions (simplified pattern matching)
+        for cond_match in re.finditer(
+            r'(\w+)\.(\w+)\s*(=|!=|>|<|>=|<=|like|in|is\s+null|is\s+not\s+null)\b',
+            where_clause,
+            re.IGNORECASE
+        ):
+            entity_alias = cond_match.group(1)
+            column = cond_match.group(2)
+            operator = cond_match.group(3).upper()
+            
+            conditions.add(QueryCondition(
+                table_name=table_name,
+                column_name=column,
+                operator=operator
+            ))
         
-        logger.info("Configuration:")
-        logger.info(f"  Repository path: {args.repo_path}")
-        logger.info(f"  Flyway path: {args.flyway_path}")
-        logger.info(f"  Fail threshold: {args.fail_threshold}")
-        logger.info(f"  Output formats: {', '.join(args.formats)}")
-        
-        # Dependency injection
-        metadata_extractor = KotlinEntityExtractor()
-        query_analyzer = SpringDataQueryAnalyzer(metadata_extractor)
-        analyzer = PipelineIndexAnalyzer(metadata_extractor, query_analyzer)
-        
-        analyzer.set_fail_threshold(args.fail_threshold)
-        success = analyzer.run_pipeline_analysis(args.repo_path, args.flyway_path)
-        
-        # Generate reports
-        query_conditions = query_analyzer.analyze_repositories(args.repo_path)
-        missing_indexes = analyzer._identify_missing_indexes(query_conditions)
-        
-        logger.info(f"{LogIcons.REPORT.value} Generating reports...")
-        ReportGenerator.generate_report(
-            missing_indexes,
-            output_path=args.output_prefix,
-            formats=args.formats
-        )
-        
-        if success:
-            logger.info(f"{LogIcons.SUCCESS.value} Analysis completed successfully")
-        else:
-            logger.error(f"{LogIcons.ERROR.value} Analysis failed due to missing indexes")
-        
-        sys.exit(0 if success else 1)
-        
-    except Exception as e:
-        logger.error(f"{LogIcons.ERROR.value} Fatal error: {str(e)}")
-        sys.exit(1)
+        return conditions
 
-if __name__ == "__main__":
-    main()
+    def _parse_sql_query(self, query: str, table_name: str) -> Set[QueryCondition]:
+        """Parse native SQL query conditions"""
+        conditions = set()
+        
+        try:
+            parsed = sqlparse.parse(query)
+            for stmt in parsed:
+                for token in stmt.tokens:
+                    if isinstance(token, sqlparse.sql.Where):
+                        for identifier in token.get_identifiers():
+                            # Find comparison operators near the identifier
+                            next_token = token.token_next(token.token_index(identifier))[1]
+                            operator = '='
+                            if next_token and next_token.value.upper() in ('=', '!=', '>', '<', '>=', '<=', 'LIKE', 'IN'):
+                                operator = next_token.value.upper()
+                            
+                            conditions.add(QueryCondition(
+                                table_name=table_name,
+                                column_name=identifier.get_real_name(),
+                                operator=operator
+                            ))
+        except Exception as e:
+            logger.warning(f"{LogIcons.WARNING.value} Failed to parse SQL query: {str(e)}")
+        
+        return conditions
+
+    def _parse_custom_impl(self, content: str, file_path: str) -> Set[QueryCondition]:
+        """Parse custom implementation methods if needed"""
+        # This can be expanded to analyze custom query builder methods
+        return set()
+
+    def _camel_to_snake(self, name: str) -> str:
+        """Convert CamelCase to snake_case"""
+        name = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+        return re.sub('([a-z0-9])([A-Z])', r'\1_\2', name).lower()
