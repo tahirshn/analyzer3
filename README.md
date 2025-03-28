@@ -1,105 +1,161 @@
-class KotlinEntityExtractor(MetadataExtractor):
-    """Extracts metadata from Kotlin entity classes"""
+class ReportGenerator:
+    """Generates reports in multiple formats (text, JSON, HTML)"""
     
-    def extract_entity_metadata(self, file_content: str, file_path: str) -> Optional[EntityMetadata]:
-        if '@Entity' not in file_content:
-            return None
-
-        class_name = self._extract_class_name(file_content)
-        if not class_name:
-            return None
-
-        table_name = self._extract_table_name(file_content, class_name)
-        fields = self._extract_fields(file_content, class_name)
-        relationships = self._extract_relationships(file_content)
-
-        return EntityMetadata(
-            table_name=table_name,
-            fields=fields,
-            relationships=relationships
-        )
-
-    def _extract_class_name(self, content: str) -> Optional[str]:
-        match = re.search(r'class\s+(\w+)', content)
-        return match.group(1) if match else None
-
-    def _extract_table_name(self, content: str, class_name: str) -> str:
-        table_match = re.search(
-            r'@Table\s*\(\s*name\s*=\s*["\']([^"\']+)["\']',
-            content,
-            re.DOTALL
-        )
-        if table_match:
-            return table_match.group(1).lower()
-        return self._camel_to_snake(class_name)
-
-    def _extract_column_name(self, field_content: str, field_name: str) -> str:
-        """Extracts the column name from a field declaration"""
-        # Check for explicit @Column annotation
-        column_match = re.search(
-            r'@Column\s*\(\s*name\s*=\s*["\']([^"\']+)["\']',
-            field_content
-        )
-        if column_match:
-            return column_match.group(1).lower()
+    @staticmethod
+    def generate_report(missing_indexes: Set[QueryCondition], 
+                       output_path: str = "index-report",
+                       formats: List[str] = ["text", "json", "html"]) -> None:
+        """Generate reports in specified formats"""
         
-        # Check for @JoinColumn annotation (for relationships)
-        join_column_match = re.search(
-            r'@JoinColumn\s*\(\s*name\s*=\s*["\']([^"\']+)["\']',
-            field_content
-        )
-        if join_column_match:
-            return join_column_match.group(1).lower()
+        # Group by table for better organization
+        by_table = defaultdict(list)
+        for condition in missing_indexes:
+            by_table[condition.table_name].append(condition)
         
-        # Default to snake_case version of field name
-        return self._camel_to_snake(field_name)
+        # Generate each requested format
+        for fmt in formats:
+            if fmt == "text":
+                ReportGenerator._generate_text_report(by_table, f"{output_path}.txt")
+            elif fmt == "json":
+                ReportGenerator._generate_json_report(by_table, f"{output_path}.json")
+            elif fmt == "html":
+                ReportGenerator._generate_html_report(by_table, f"{output_path}.html")
 
-    def _extract_fields(self, content: str, class_name: str) -> Dict[str, EntityField]:
-        fields = {}
-        
-        for prop_match in re.finditer(
-            r'val\s+(\w+)\s*:\s*([^\n=]+?)(?:\s*=\s*[^\n]+)?(?:\s*@[^\n]+)*',
-            content,
-            re.DOTALL
-        ):
-            prop_name = prop_match.group(1)
-            full_match = prop_match.group(0)
+    @staticmethod
+    def _generate_text_report(by_table: Dict[str, List[QueryCondition]], output_path: str) -> None:
+        """Generate plain text report"""
+        with open(output_path, 'w') as f:
+            if not by_table:
+                f.write("✅ No missing indexes found!\n")
+                return
             
-            if '@OneToMany' in full_match:
-                continue
+            f.write("Missing Database Indexes Report\n")
+            f.write("=" * 40 + "\n\n")
+            
+            for table in sorted(by_table.keys()):
+                f.write(f"Table: {table}\n")
+                f.write("-" * 40 + "\n")
                 
-            is_id = '@Id' in full_match
-            column_name = self._extract_column_name(full_match, prop_name)
-            
-            fields[prop_name] = EntityField(
-                name=prop_name,
-                column_name=column_name,
-                is_id=is_id,
-                is_relationship='@ManyToOne' in full_match
-            )
-        
-        return fields
+                for cond in sorted(by_table[table], key=lambda c: c.column_name):
+                    f.write(f"  Column: {cond.column_name}\n")
+                    f.write(f"    Used with operator: {cond.operator}\n")
+                    f.write(f"    Recommended index:\n")
+                    f.write(f"      CREATE INDEX idx_{table}_{cond.column_name} ON {table}({cond.column_name});\n\n")
+                
+                f.write("\n")
 
-    def _extract_relationships(self, content: str) -> Dict[str, RelationshipMetadata]:
-        relationships = {}
+    @staticmethod
+    def _generate_json_report(by_table: Dict[str, List[QueryCondition]], output_path: str) -> None:
+        """Generate JSON report"""
+        import json
         
-        for rel_match in re.finditer(
-            r'@ManyToOne[^v]*val\s+(\w+)\s*:\s*(\w+)[^@]*@JoinColumn\s*\([^)]*name\s*=\s*["\']([^"\']+)["\']',
-            content,
-            re.DOTALL
-        ):
-            prop_name = rel_match.group(1)
-            target_entity = rel_match.group(2)
-            join_column = rel_match.group(3).lower()
-            
-            relationships[prop_name] = RelationshipMetadata(
-                target_entity=target_entity,
-                join_column=join_column,
-                relationship_type='ManyToOne'
-            )
+        report_data = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "missing_indexes": []
+        }
         
-        return relationships
+        for table, conditions in sorted(by_table.items()):
+            for cond in sorted(conditions, key=lambda c: c.column_name):
+                report_data["missing_indexes"].append({
+                    "table": table,
+                    "column": cond.column_name,
+                    "operator": cond.operator,
+                    "recommendation": {
+                        "sql": f"CREATE INDEX idx_{table}_{cond.column_name} ON {table}({cond.column_name})",
+                        "priority": "high" if cond.operator in {'<', '<=', '>', '>=', 'BETWEEN'} else "medium"
+                    }
+                })
+        
+        with open(output_path, 'w') as f:
+            json.dump(report_data, f, indent=2)
 
-    def _camel_to_snake(self, name: str) -> str:
-        name = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
-        return re.sub('([a-z0-9])([A-Z])', r'\1_\2', name).lower()
+    @staticmethod
+    def _generate_html_report(by_table: Dict[str, List[QueryCondition]], output_path: str) -> None:
+        """Generate HTML report"""
+        with open(output_path, 'w') as f:
+            f.write("""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Missing Indexes Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; margin: 20px; }
+        h1 { color: #333; }
+        h2 { color: #444; margin-top: 30px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+        .index { background: #f9f9f9; padding: 10px; margin: 10px 0; border-left: 4px solid #ccc; }
+        .sql { font-family: monospace; background: #f0f0f0; padding: 5px; display: inline-block; }
+        .priority-high { border-left-color: #e74c3c; }
+        .priority-medium { border-left-color: #f39c12; }
+        .summary { background: #f5f5f5; padding: 15px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Missing Database Indexes Report</h1>
+    <div class="summary">
+        Generated: {timestamp}<br>
+        Total missing indexes found: {count}
+    </div>
+""".format(
+    timestamp=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    count=sum(len(conditions) for conditions in by_table.values())
+))
+
+            if not by_table:
+                f.write("""<div style="color: green; font-size: 1.2em;">
+                    ✅ No missing indexes found!
+                </div>""")
+            else:
+                for table in sorted(by_table.keys()):
+                    f.write(f'<h2>Table: {table}</h2>\n')
+                    
+                    for cond in sorted(by_table[table], key=lambda c: c.column_name):
+                        priority = "high" if cond.operator in {'<', '<=', '>', '>=', 'BETWEEN'} else "medium"
+                        f.write(f"""<div class="index priority-{priority}">
+    <strong>Column:</strong> {cond.column_name}<br>
+    <strong>Operator:</strong> {cond.operator}<br>
+    <strong>Recommended index:</strong><br>
+    <div class="sql">CREATE INDEX idx_{table}_{cond.column_name} ON {table}({cond.column_name});</div>
+</div>
+""")
+
+            f.write("""</body>
+</html>""")
+
+# Update the main function to support multiple output formats
+def main():
+    parser = argparse.ArgumentParser(
+        description="Enterprise Database Index Analyzer for Spring Data JPA (Python 3.6)"
+    )
+    parser.add_argument("--repo-path", default=".",
+                       help="Path to code repository")
+    parser.add_argument("--flyway-path", default="src/main/resources/db/migration",
+                       help="Path to Flyway migrations")
+    parser.add_argument("--fail-threshold", type=int, default=0,
+                       help="Maximum allowed missing indexes before failing")
+    parser.add_argument("--formats", nargs="+", default=["text"],
+                       choices=["text", "json", "html"],
+                       help="Output formats for the report")
+    parser.add_argument("--output-prefix", default="index-report",
+                       help="Prefix for output files")
+    
+    args = parser.parse_args()
+
+    # Dependency injection
+    metadata_extractor = KotlinEntityExtractor()
+    query_analyzer = SpringDataQueryAnalyzer(metadata_extractor)
+    analyzer = PipelineIndexAnalyzer(metadata_extractor, query_analyzer)
+    
+    analyzer.set_fail_threshold(args.fail_threshold)
+    success = analyzer.run_pipeline_analysis(args.repo_path, args.flyway_path)
+    
+    # Generate reports
+    query_conditions = query_analyzer.analyze_repositories(args.repo_path)
+    missing_indexes = analyzer._identify_missing_indexes(query_conditions)
+    ReportGenerator.generate_report(
+        missing_indexes,
+        output_path=args.output_prefix,
+        formats=args.formats
+    )
+    
+    if not success:
+        exit(1)
