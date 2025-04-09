@@ -1,49 +1,45 @@
-#!/bin/bash
+import org.junit.jupiter.api.Test
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest
+import kotlin.reflect.full.declaredMemberFunctions
+import kotlin.reflect.jvm.isAccessible
 
-# Konfigürasyon
-TEST_CONFIG_FILE="src/test/resources/application-test.properties"
-SQL_LOG_FILE="build/sql_logs/sql_queries.log"
-GRADLE_COMMAND="./gradlew test --info"
+@DataJpaTest
+class RepositoryMethodInvokerTest {
 
-# Log dizinini oluştur
-mkdir -p "build/sql_logs"
+    @Autowired
+    lateinit var repositories: List<Any> // Tüm repository'ler otomatik enjekte edilir
 
-# Önceki log dosyasını temizle
-> "$SQL_LOG_FILE"
+    @Test
+    fun `invoke all repository methods`() {
+        repositories.forEach { repository ->
+            val repositoryClass = repository::class
+            println("\nTesting repository: ${repositoryClass.simpleName}")
 
-# Test için geçici log ayarlarını oluştur
-echo "Spring ve Hibernate log ayarları etkinleştiriliyor..."
-cat > "$TEST_CONFIG_FILE" << 'EOL'
-# Hibernate SQL Logging
-spring.jpa.show-sql=true
-spring.jpa.properties.hibernate.format_sql=true
-spring.jpa.properties.hibernate.use_sql_comments=true
+            repositoryClass.declaredMemberFunctions.forEach { function ->
+                try {
+                    function.isAccessible = true
+                    when (function.parameters.size) {
+                        1 -> function.call(repository) // No-arg methods
+                        2 -> { // Methods with parameters
+                            val mockParam = createMockParam(function.parameters[1].type)
+                            function.call(repository, mockParam)
+                        }
+                        else -> println("Skipping ${function.name} - complex parameters")
+                    }
+                    println("Called: ${function.name}")
+                } catch (e: Exception) {
+                    println("Failed to call ${function.name}: ${e.message}")
+                }
+            }
+        }
+    }
 
-# Logging Levels
-logging.level.org.hibernate.SQL=DEBUG
-logging.level.org.hibernate.type=TRACE
-logging.level.org.hibernate.stat=DEBUG
-logging.level.org.hibernate.engine.QueryPlan=DEBUG
-
-# Log output to console
-logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{36} - %msg%n
-EOL
-
-echo "Testler çalıştırılıyor ve SQL sorguları loglanıyor..."
-$GRADLE_COMMAND | tee -a "$SQL_LOG_FILE"
-
-# Logları filtrele ve formatla
-echo "SQL sorguları filtreleniyor..."
-grep -E "Hibernate:|org.hibernate.SQL" "$SQL_LOG_FILE" > "${SQL_LOG_FILE}.tmp"
-sed -i -e 's/^.*Hibernate: //' \
-       -e 's/^.*org.hibernate.SQL.* - //' \
-       -e '/^[[:space:]]*$/d' \
-       "${SQL_LOG_FILE}.tmp"
-
-mv "${SQL_LOG_FILE}.tmp" "$SQL_LOG_FILE"
-
-# Geçici config dosyasını temizle (opsiyonel)
-# rm "$TEST_CONFIG_FILE"
-
-echo -e "\nİşlem tamamlandı!"
-echo "SQL sorguları şu dosyada kaydedildi: $SQL_LOG_FILE"
+    private fun createMockParam(type: kotlin.reflect.KType): Any {
+        // Basit mock nesneleri oluştur
+        return when (type.classifier) {
+            String::class -> "test"
+            Long::class -> 1L
+            else -> Any() // Daha kompleks tipler için genişletebilirsiniz
+        }
+    }
+}
