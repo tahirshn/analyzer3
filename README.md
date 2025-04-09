@@ -669,3 +669,18 @@ class RepositoryScanner(
 // Kullanım
 val allRepositories = repositoryScanner.findAllRepositoryClasses()
 val allQueries = queryExtractor.extractAllQueries(allRepositories)
+
+import org.hibernate.engine.query.spi.QueryPlanCache
+import org.hibernate.engine.spi.SessionFactoryImplementor
+import org.hibernate.query.internal.QueryImpl
+import org.hibernate.query.spi.QueryInterpretationCache
+
+fun translateHqlToSql(hql: String, sessionFactory: SessionFactoryImplementor): String {
+    return try {
+        val queryInterpretationCache: QueryInterpretationCache = sessionFactory.queryPlanCache
+        val queryPlan = queryInterpretationCache.getHQLQueryPlan(hql, false, emptyMap())
+        queryPlan.sqlStrings.joinToString(" ")
+    } catch (e: Exception) {
+        "Error translating HQL to SQL: ${e.message}"
+    }
+}
