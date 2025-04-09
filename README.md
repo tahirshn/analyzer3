@@ -1,178 +1,181 @@
-# Obtaining Column Metadata from a Spring Boot/Hibernate Project
+# Kotlin ile Spring Boot/Hibernate Projesinden Sütun Metadata'sı Alma
 
-To extract column metadata (like column names, types, constraints, etc.) from a Spring Boot application using Hibernate, you have several options:
+Aynı işlevselliği Kotlin ile nasıl elde edebileceğinizi aşağıda bulabilirsiniz:
 
-## 1. Using Hibernate's Metadata API
+## 1. Hibernate Metadata API Kullanımı (Kotlin)
 
-```java
-import org.hibernate.boot.Metadata;
-import org.hibernate.boot.MetadataSources;
-import org.hibernate.boot.registry.StandardServiceRegistry;
-import org.hibernate.boot.registry.StandardServiceRegistryBuilder;
-import org.hibernate.mapping.Column;
-import org.hibernate.mapping.PersistentClass;
-import org.hibernate.mapping.Property;
-import org.hibernate.mapping.Table;
+```kotlin
+import org.hibernate.boot.Metadata
+import org.hibernate.boot.MetadataSources
+import org.hibernate.boot.registry.StandardServiceRegistry
+import org.hibernate.boot.registry.StandardServiceRegistryBuilder
+import org.hibernate.mapping.Column
+import org.hibernate.mapping.PersistentClass
+import org.hibernate.mapping.Property
+import org.hibernate.mapping.Table
 
-public class HibernateMetadataExtractor {
+class HibernateMetadataExtractor {
 
-    public void extractMetadata() {
-        StandardServiceRegistry registry = new StandardServiceRegistryBuilder()
-            .configure() // loads hibernate.cfg.xml
-            .build();
+    fun extractMetadata() {
+        val registry: StandardServiceRegistry = StandardServiceRegistryBuilder()
+            .configure() // hibernate.cfg.xml yükler
+            .build()
         
         try {
-            Metadata metadata = new MetadataSources(registry)
-                .getMetadataBuilder()
-                .build();
+            val metadata: Metadata = MetadataSources(registry)
+                .metadataBuilder
+                .build()
             
-            // Get all entity mappings
-            for (PersistentClass persistentClass : metadata.getEntityBindings()) {
-                Table table = persistentClass.getTable();
-                System.out.println("Table: " + table.getName());
+            // Tüm entity eşlemelerini al
+            for (persistentClass in metadata.entityBindings) {
+                val table: Table = persistentClass.table
+                println("Tablo: ${table.name}")
                 
-                // Get columns
-                for (Column column : table.getColumns()) {
-                    System.out.println("  Column: " + column.getName());
-                    System.out.println("    Type: " + column.getSqlType());
-                    System.out.println("    Length: " + column.getLength());
-                    System.out.println("    Nullable: " + column.isNullable());
-                    // More properties available...
+                // Sütunları al
+                for (column in table.columns) {
+                    println("  Sütun: ${column.name}")
+                    println("    Tip: ${column.sqlType}")
+                    println("    Uzunluk: ${column.length}")
+                    println("    Nullable: ${column.isNullable}")
+                    // Daha fazla özellik...
                 }
                 
-                // Get properties (fields)
-                for (Property property : persistentClass.getProperties()) {
-                    System.out.println("Property: " + property.getName());
-                    // Access more property metadata...
+                // Özellikleri al (alanlar)
+                for (property in persistentClass.propertyIterator) {
+                    println("Özellik: ${property.name}")
+                    // Daha fazla metadata...
                 }
             }
         } finally {
-            StandardServiceRegistryBuilder.destroy(registry);
+            StandardServiceRegistryBuilder.destroy(registry)
         }
     }
 }
 ```
 
-## 2. Using JPA's Metamodel API
+## 2. JPA Metamodel API Kullanımı (Kotlin)
 
-```java
-import javax.persistence.EntityManager;
-import javax.persistence.metamodel.EntityType;
-import javax.persistence.metamodel.Metamodel;
+```kotlin
+import javax.persistence.EntityManager
+import javax.persistence.metamodel.EntityType
+import javax.persistence.metamodel.Metamodel
 
-public class JpaMetadataExtractor {
+class JpaMetadataExtractor(private val entityManager: EntityManager) {
 
-    private final EntityManager entityManager;
-
-    public JpaMetadataExtractor(EntityManager entityManager) {
-        this.entityManager = entityManager;
-    }
-
-    public void extractMetadata() {
-        Metamodel metamodel = entityManager.getMetamodel();
+    fun extractMetadata() {
+        val metamodel: Metamodel = entityManager.metamodel
         
-        for (EntityType<?> entityType : metamodel.getEntities()) {
-            System.out.println("Entity: " + entityType.getName());
+        for (entityType in metamodel.entities) {
+            println("Entity: ${entityType.name}")
             
-            entityType.getAttributes().forEach(attribute -> {
-                System.out.println("  Attribute: " + attribute.getName());
-                System.out.println("    Type: " + attribute.getJavaType().getSimpleName());
-                System.out.println("    Persistent type: " + attribute.getPersistentAttributeType());
+            entityType.attributes.forEach { attribute ->
+                println("  Özellik: ${attribute.name}")
+                println("    Tip: ${attribute.javaType.simpleName}")
+                println("    Kalıcı özellik tipi: ${attribute.persistentAttributeType}")
                 
-                // For column-specific annotations you'd need reflection
-            });
+                // Sütun-spesifik annotation'lar için reflection gerekir
+            }
         }
     }
 }
 ```
 
-## 3. Using Spring Data JPA with Reflection
+## 3. Spring Data JPA ile Reflection Kullanımı (Kotlin)
 
-```java
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
-import javax.persistence.Column;
-import javax.persistence.EntityManager;
-import java.lang.reflect.Field;
+```kotlin
+import org.springframework.stereotype.Component
+import javax.persistence.Column
+import javax.persistence.EntityManager
+import kotlin.reflect.full.memberProperties
 
 @Component
-public class EntityMetadataExtractor {
+class EntityMetadataExtractor(private val entityManager: EntityManager) {
 
-    @Autowired
-    private EntityManager entityManager;
-
-    public void extractMetadata(Class<?> entityClass) {
-        // Get JPA entity name
-        String entityName = entityClass.getSimpleName();
-        System.out.println("Entity: " + entityName);
+    fun extractMetadata(entityClass: Class<*>) {
+        // JPA entity adını al
+        val entityName = entityClass.simpleName
+        println("Entity: $entityName")
         
-        // Get fields and annotations
-        for (Field field : entityClass.getDeclaredFields()) {
-            Column columnAnnotation = field.getAnnotation(Column.class);
-            if (columnAnnotation != null) {
-                System.out.println("  Field: " + field.getName());
-                System.out.println("    Column name: " + columnAnnotation.name());
-                System.out.println("    Nullable: " + columnAnnotation.nullable());
-                System.out.println("    Length: " + columnAnnotation.length());
-                // More column properties...
-            }
-        }
-    }
-}
-```
-
-## 4. Querying Database Metadata Directly
-
-```java
-import java.sql.Connection;
-import java.sql.DatabaseMetaData;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import javax.sql.DataSource;
-
-public class DatabaseMetadataExtractor {
-
-    private final DataSource dataSource;
-
-    public DatabaseMetadataExtractor(DataSource dataSource) {
-        this.dataSource = dataSource;
-    }
-
-    public void extractMetadata() throws SQLException {
-        try (Connection connection = dataSource.getConnection()) {
-            DatabaseMetaData metaData = connection.getMetaData();
-            
-            // Get all tables
-            ResultSet tables = metaData.getTables(null, null, "%", new String[]{"TABLE"});
-            while (tables.next()) {
-                String tableName = tables.getString("TABLE_NAME");
-                System.out.println("Table: " + tableName);
-                
-                // Get columns for this table
-                ResultSet columns = metaData.getColumns(null, null, tableName, "%");
-                while (columns.next()) {
-                    System.out.println("  Column: " + columns.getString("COLUMN_NAME"));
-                    System.out.println("    Type: " + columns.getString("TYPE_NAME"));
-                    System.out.println("    Size: " + columns.getInt("COLUMN_SIZE"));
-                    System.out.println("    Nullable: " + columns.getInt("NULLABLE"));
-                    // More column properties...
+        // Alanları ve annotation'ları al
+        entityClass.kotlin.memberProperties.forEach { property ->
+            property.annotations.forEach { annotation ->
+                if (annotation is Column) {
+                    println("  Alan: ${property.name}")
+                    println("    Sütun adı: ${annotation.name}")
+                    println("    Nullable: ${annotation.nullable}")
+                    println("    Uzunluk: ${annotation.length}")
+                    // Daha fazla sütun özelliği...
                 }
-                columns.close();
             }
-            tables.close();
         }
     }
 }
 ```
 
-## Best Approach for Real Implementation
+## 4. Doğrudan Database Metadata Sorgulama (Kotlin)
 
-For a production application, I recommend:
+```kotlin
+import java.sql.Connection
+import java.sql.DatabaseMetaData
+import javax.sql.DataSource
 
-1. **For entity/column mapping info**: Use Hibernate's Metadata API (option 1) as it provides the most complete picture of how your entities map to database structures.
+class DatabaseMetadataExtractor(private val dataSource: DataSource) {
 
-2. **For runtime metadata**: Use JPA's Metamodel API (option 2) as it's standardized and works with any JPA provider.
+    fun extractMetadata() {
+        dataSource.connection.use { connection ->
+            val metaData: DatabaseMetaData = connection.metaData
+            
+            // Tüm tabloları al
+            metaData.getTables(null, null, "%", arrayOf("TABLE")).use { tables ->
+                while (tables.next()) {
+                    val tableName = tables.getString("TABLE_NAME")
+                    println("Tablo: $tableName")
+                    
+                    // Bu tablonun sütunlarını al
+                    metaData.getColumns(null, null, tableName, "%").use { columns ->
+                        while (columns.next()) {
+                            println("  Sütun: ${columns.getString("COLUMN_NAME")}")
+                            println("    Tip: ${columns.getString("TYPE_NAME")}")
+                            println("    Boyut: ${columns.getInt("COLUMN_SIZE")}")
+                            println("    Nullable: ${columns.getInt("NULLABLE")}")
+                            // Daha fazla sütun özelliği...
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
 
-3. **For actual database schema**: Use DatabaseMetaData (option 4) if you need to verify what's actually in the database.
+## Kotlin-Spesifik İyileştirmeler
 
-Remember that in Spring Boot, you can autowire the `EntityManager` or `SessionFactory` to access these APIs.
+Kotlin'de kodu daha idiomatik hale getirebiliriz:
+
+```kotlin
+// Extension fonksiyon ile daha temiz kullanım
+fun EntityManager.extractMetadata() {
+    metamodel.entities.forEach { entityType ->
+        println("Entity: ${entityType.name}")
+        entityType.attributes.forEach { attribute ->
+            println("  ${attribute.name}: ${attribute.javaType.simpleName}")
+        }
+    }
+}
+
+// Kullanımı:
+// entityManager.extractMetadata()
+```
+
+Kotlin'in null-safety özelliklerini kullanarak:
+
+```kotlin
+fun safeExtractColumnInfo(column: Column?) {
+    column?.let {
+        println("Sütun: ${it.name}")
+        println("Tip: ${it.sqlType}")
+    } ?: println("Sütun bilgisi bulunamadı")
+}
+```
+
+Bu Kotlin implementasyonları, Java versiyonlarıyla aynı işlevselliği sağlarken Kotlin'in daha kısa ve okunabilir sözdizimini kullanır. Özellikle null safety, extension fonksiyonlar ve koleksiyon işlemleri Kotlin'de daha temiz bir kod sağlar.
