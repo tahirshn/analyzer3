@@ -1,41 +1,31 @@
-sping hibernate
-
-
-import org.hibernate.SessionFactory
-import org.hibernate.engine.spi.SessionFactoryImplementor
-import org.hibernate.hql.internal.ast.QueryTranslatorImpl
 import org.springframework.data.jpa.repository.Query
-import org.springframework.data.repository.core.support.RepositoryFactorySupport
 import org.springframework.stereotype.Component
 import javax.persistence.EntityManager
-import javax.persistence.PersistenceContext
 import kotlin.reflect.KClass
 import kotlin.reflect.full.declaredFunctions
 import kotlin.reflect.full.findAnnotation
 import kotlin.reflect.jvm.javaMethod
 
 @Component
-class JpaQueryExtractor(
-    @PersistenceContext private val entityManager: EntityManager
-) {
-    private val sessionFactory: SessionFactoryImplementor by lazy {
-        entityManager.entityManagerFactory.unwrap(SessionFactory::class.java) as SessionFactoryImplementor
-    }
+class JpaQueryExtractor {
 
     data class RepositoryQueryInfo(
         val repositoryName: String,
         val methodName: String,
         val querySource: QuerySource,
-        val rawQuery: String,
+        val query: String,
         val isNative: Boolean
     )
 
     enum class QuerySource {
-        ANNOTATION, METHOD_NAME, UNKNOWN
+        ANNOTATION, 
+        METHOD_NAME, 
+        DERIVED, 
+        UNKNOWN
     }
 
     /**
-     * Tüm repository'lerdeki query'leri çıkarır
+     * Repository'lerdeki tüm query'leri çıkarır
      */
     fun extractAllQueries(repositories: List<KClass<*>>): List<RepositoryQueryInfo> {
         return repositories.flatMap { extractQueriesFromRepository(it) }
@@ -52,26 +42,22 @@ class JpaQueryExtractor(
             when {
                 queryAnnotation != null -> {
                     // @Query ile tanımlanmış query
-                    val query = queryAnnotation.value
-                    val isNative = queryAnnotation.nativeQuery
-                    val translatedQuery = if (!isNative) translateHqlToSql(query) else query
-
                     RepositoryQueryInfo(
                         repositoryName = repositoryClass.simpleName!!,
                         methodName = function.name,
                         querySource = QuerySource.ANNOTATION,
-                        rawQuery = translatedQuery,
-                        isNative = isNative
+                        query = queryAnnotation.value,
+                        isNative = queryAnnotation.nativeQuery
                     )
                 }
                 isQueryMethod(method.name) -> {
-                    // Method name inference ile oluşturulmuş query
+                    // Method name'den türetilmiş query
                     val query = generateQueryFromMethodName(repositoryClass, function)
                     RepositoryQueryInfo(
                         repositoryName = repositoryClass.simpleName!!,
                         methodName = function.name,
                         querySource = QuerySource.METHOD_NAME,
-                        rawQuery = query,
+                        query = query,
                         isNative = false
                     )
                 }
@@ -81,12 +67,15 @@ class JpaQueryExtractor(
     }
 
     private fun isQueryMethod(methodName: String): Boolean {
-        val queryKeywords = listOf("find", "read", "get", "query", "search", "stream", "count", "exists", "delete", "remove")
+        val queryKeywords = listOf(
+            "find", "read", "get", "query", "search", 
+            "stream", "count", "exists", "delete", "remove"
+        )
         return queryKeywords.any { methodName.startsWith(it, ignoreCase = true) }
     }
 
     private fun generateQueryFromMethodName(repositoryClass: KClass<*>, function: KFunction<*>): String {
-        // Basit bir implementasyon - gerçekte Spring'in query creation mekanizması daha karmaşıktır
+        // Repository'nin entity tipini bul
         val entityClass = repositoryClass.supertypes
             .firstOrNull { it.toString().contains("JpaRepository") }
             ?.arguments?.get(0)?.type?.classifier as? KClass<*>
@@ -97,34 +86,33 @@ class JpaQueryExtractor(
 
         return when {
             methodName.startsWith("findBy") -> {
-                val property = methodName.removePrefix("findBy").decapitalize()
-                "SELECT e FROM $entityName e WHERE e.$property = ?1"
+                val properties = extractProperties(methodName.removePrefix("findBy"))
+                "SELECT e FROM $entityName e WHERE ${buildWhereClause(properties)}"
             }
             methodName.startsWith("countBy") -> {
-                val property = methodName.removePrefix("countBy").decapitalize()
-                "SELECT COUNT(e) FROM $entityName e WHERE e.$property = ?1"
+                val properties = extractProperties(methodName.removePrefix("countBy"))
+                "SELECT COUNT(e) FROM $entityName e WHERE ${buildWhereClause(properties)}"
             }
             methodName.startsWith("deleteBy") -> {
-                val property = methodName.removePrefix("deleteBy").decapitalize()
-                "DELETE FROM $entityName e WHERE e.$property = ?1"
+                val properties = extractProperties(methodName.removePrefix("deleteBy"))
+                "DELETE FROM $entityName e WHERE ${buildWhereClause(properties)}"
             }
-            else -> "Generated query for $methodName on $entityName"
-        }.let { translateHqlToSql(it) }
+            methodName.startsWith("existsBy") -> {
+                val properties = extractProperties(methodName.removePrefix("existsBy"))
+                "SELECT CASE WHEN COUNT(e) > 0 THEN true ELSE false END FROM $entityName e WHERE ${buildWhereClause(properties)}"
+            }
+            else -> "Derived query for $methodName on $entityName"
+        }
     }
 
-    private fun translateHqlToSql(hql: String): String {
-        return try {
-            val translators = QueryTranslatorImpl(
-                queryIdentifier = hql,
-                query = hql,
-                enabledFilters = emptyMap(),
-                factory = sessionFactory,
-                replacements = QueryTranslatorImpl.QUERY_TRANSLATOR
-            )
-            translators.compile(emptyMap(), false)
-            translators.sqlString
-        } catch (e: Exception) {
-            "Error translating HQL to SQL: ${e.message}"
-        }
+    private fun extractProperties(methodPart: String): List<String> {
+        // "FirstNameAndLastName" -> ["firstName", "lastName"]
+        return methodPart.split("(?=[A-Z])".toRegex())
+            .map { it.decapitalize() }
+            .filter { it.isNotBlank() }
+    }
+
+    private fun buildWhereClause(properties: List<String>): String {
+        return properties.joinToString(" AND ") { "e.${it} = ?${properties.indexOf(it) + 1}" }
     }
 }
