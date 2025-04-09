@@ -1,32 +1,49 @@
 #!/bin/bash
 
-# SQL log dosyasının adı ve yeri
-SQL_LOG_FILE="sql_queries.log"
-OUTPUT_DIR="build/sql_logs"
+# Konfigürasyon
+TEST_CONFIG_FILE="src/test/resources/application-test.properties"
+SQL_LOG_FILE="build/sql_logs/sql_queries.log"
+GRADLE_COMMAND="./gradlew test --info"
 
-# Log dosyası için dizin oluştur
-mkdir -p "$OUTPUT_DIR"
-FULL_PATH="$OUTPUT_DIR/$SQL_LOG_FILE"
+# Log dizinini oluştur
+mkdir -p "build/sql_logs"
 
 # Önceki log dosyasını temizle
-> "$FULL_PATH"
+> "$SQL_LOG_FILE"
 
-echo "SQL sorguları $FULL_PATH dosyasına kaydedilecek..."
+# Test için geçici log ayarlarını oluştur
+echo "Spring ve Hibernate log ayarları etkinleştiriliyor..."
+cat > "$TEST_CONFIG_FILE" << 'EOL'
+# Hibernate SQL Logging
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+spring.jpa.properties.hibernate.use_sql_comments=true
 
-# Hibernate SQL log ayarlarını geçici olarak etkinleştirerek testleri çalıştır
-./gradlew test \
-  -Dspring.jpa.show-sql=true \
-  -Dspring.jpa.properties.hibernate.format_sql=true \
-  -Dspring.jpa.properties.hibernate.use_sql_comments=true \
-  -Dlogging.level.org.hibernate.SQL=DEBUG \
-  -Dlogging.level.org.hibernate.type.descriptor.sql.BasicBinder=TRACE \
-  2>&1 | tee -a "$FULL_PATH"
+# Logging Levels
+logging.level.org.hibernate.SQL=DEBUG
+logging.level.org.hibernate.type=TRACE
+logging.level.org.hibernate.stat=DEBUG
+logging.level.org.hibernate.engine.QueryPlan=DEBUG
 
-# Sadece SQL sorgularını filtrele ve log dosyasına yaz
-grep -h -E "Hibernate:|org.hibernate.SQL" "$FULL_PATH" > "${FULL_PATH}.tmp" && mv "${FULL_PATH}.tmp" "$FULL_PATH"
+# Log output to console
+logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{36} - %msg%n
+EOL
 
-# Format the SQL file for better readability
-sed -i 's/^.*Hibernate: //g' "$FULL_PATH"
-sed -i 's/^.*org.hibernate.SQL.* - //g' "$FULL_PATH"
+echo "Testler çalıştırılıyor ve SQL sorguları loglanıyor..."
+$GRADLE_COMMAND | tee -a "$SQL_LOG_FILE"
 
-echo "Testler tamamlandı. SQL sorguları $FULL_PATH dosyasına kaydedildi."
+# Logları filtrele ve formatla
+echo "SQL sorguları filtreleniyor..."
+grep -E "Hibernate:|org.hibernate.SQL" "$SQL_LOG_FILE" > "${SQL_LOG_FILE}.tmp"
+sed -i -e 's/^.*Hibernate: //' \
+       -e 's/^.*org.hibernate.SQL.* - //' \
+       -e '/^[[:space:]]*$/d' \
+       "${SQL_LOG_FILE}.tmp"
+
+mv "${SQL_LOG_FILE}.tmp" "$SQL_LOG_FILE"
+
+# Geçici config dosyasını temizle (opsiyonel)
+# rm "$TEST_CONFIG_FILE"
+
+echo -e "\nİşlem tamamlandı!"
+echo "SQL sorguları şu dosyada kaydedildi: $SQL_LOG_FILE"
