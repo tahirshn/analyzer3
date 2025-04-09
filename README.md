@@ -179,3 +179,103 @@ fun safeExtractColumnInfo(column: Column?) {
 ```
 
 Bu Kotlin implementasyonları, Java versiyonlarıyla aynı işlevselliği sağlarken Kotlin'in daha kısa ve okunabilir sözdizimini kullanır. Özellikle null safety, extension fonksiyonlar ve koleksiyon işlemleri Kotlin'de daha temiz bir kod sağlar.
+
+
+import org.hibernate.SessionFactory
+import org.hibernate.boot.Metadata
+import org.hibernate.boot.MetadataSources
+import org.hibernate.boot.registry.StandardServiceRegistry
+import org.hibernate.boot.registry.StandardServiceRegistryBuilder
+import org.springframework.stereotype.Component
+import javax.persistence.EntityManager
+import javax.persistence.metamodel.EntityType
+import javax.sql.DataSource
+import java.sql.DatabaseMetaData
+
+@Component
+class MetadataExtractor(
+    private val entityManager: EntityManager,
+    private val dataSource: DataSource
+) {
+    
+    // 1. Hibernate Metadata API ile
+    fun extractUsingHibernateMetadata(): Map<String, List<ColumnInfo>> {
+        val sessionFactory = entityManager.entityManagerFactory.unwrap(SessionFactory::class.java)
+        val registry: StandardServiceRegistry = StandardServiceRegistryBuilder()
+            .applySettings(sessionFactory.properties)
+            .build()
+        
+        return try {
+            val metadata: Metadata = MetadataSources(registry)
+                .metadataBuilder
+                .build()
+            
+            metadata.entityBindings.associate { persistentClass ->
+                val table = persistentClass.table
+                table.name to table.columns.map { column ->
+                    ColumnInfo(
+                        name = column.name,
+                        type = column.sqlType,
+                        length = column.length,
+                        nullable = column.isNullable,
+                        unique = column.isUnique,
+                        table = table.name
+                    )
+                }
+            }
+        } finally {
+            StandardServiceRegistryBuilder.destroy(registry)
+        }
+    }
+    
+    // 2. JPA Metamodel API ile
+    fun extractUsingJpaMetamodel(): Map<String, List<ColumnInfo>> {
+        return entityManager.metamodel.entities.associate { entityType ->
+            entityType.name to entityType.attributes.map { attribute ->
+                ColumnInfo(
+                    name = attribute.name,
+                    type = attribute.javaType.simpleName,
+                    table = entityType.name
+                )
+            }
+        }
+    }
+    
+    // 3. Database Metadata ile
+    fun extractUsingDatabaseMetadata(): Map<String, List<ColumnInfo>> {
+        dataSource.connection.use { connection ->
+            val metaData: DatabaseMetaData = connection.metaData
+            val result = mutableMapOf<String, MutableList<ColumnInfo>>()
+            
+            metaData.getTables(null, null, "%", arrayOf("TABLE")).use { tables ->
+                while (tables.next()) {
+                    val tableName = tables.getString("TABLE_NAME")
+                    
+                    metaData.getColumns(null, null, tableName, "%").use { columns ->
+                        while (columns.next()) {
+                            val columnInfo = ColumnInfo(
+                                name = columns.getString("COLUMN_NAME"),
+                                type = columns.getString("TYPE_NAME"),
+                                length = columns.getInt("COLUMN_SIZE"),
+                                nullable = columns.getInt("NULLABLE") == 1,
+                                table = tableName
+                            )
+                            
+                            result.getOrPut(tableName) { mutableListOf() }.add(columnInfo)
+                        }
+                    }
+                }
+            }
+            return result
+        }
+    }
+    
+    data class ColumnInfo(
+        val name: String,
+        val type: String,
+        val length: Int? = null,
+        val nullable: Boolean? = null,
+        val unique: Boolean? = null,
+        val table: String
+    )
+}
