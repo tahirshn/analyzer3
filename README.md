@@ -279,3 +279,221 @@ class MetadataExtractor(
         val table: String
     )
 }
+-------------------------------------------------------
+
+
+import org.hibernate.SessionFactory
+import org.springframework.stereotype.Component
+import javax.persistence.EntityManager
+import javax.sql.DataSource
+import java.sql.DatabaseMetaData
+
+@Component
+class TableIndexExtractor(
+    private val entityManager: EntityManager,
+    private val dataSource: DataSource
+) {
+    
+    data class TableInfo(
+        val name: String,
+        val type: String,
+        val remarks: String? = null
+    )
+    
+    data class IndexInfo(
+        val name: String,
+        val columnName: String,
+        val ordinalPosition: Int,
+        val isUnique: Boolean,
+        val isPrimaryKey: Boolean
+    )
+    
+    // Tüm tabloları ve index bilgilerini getir
+    fun extractAllTablesWithIndexes(): Map<TableInfo, List<IndexInfo>> {
+        return dataSource.connection.use { connection ->
+            val metaData = connection.metaData
+            val result = mutableMapOf<TableInfo, List<IndexInfo>>()
+            
+            // Tüm tabloları al
+            metaData.getTables(null, null, "%", arrayOf("TABLE")).use { tables ->
+                while (tables.next()) {
+                    val tableInfo = TableInfo(
+                        name = tables.getString("TABLE_NAME"),
+                        type = tables.getString("TABLE_TYPE"),
+                        remarks = tables.getString("REMARKS")
+                    )
+                    
+                    // Tablonun index bilgilerini al
+                    val indexes = getIndexesForTable(metaData, tableInfo.name)
+                    result[tableInfo] = indexes
+                }
+            }
+            result
+        }
+    }
+    
+    // Belirli bir tablonun index bilgilerini getir
+    fun getIndexesForTable(tableName: String): List<IndexInfo> {
+        return dataSource.connection.use { connection ->
+            getIndexesForTable(connection.metaData, tableName)
+        }
+    }
+    
+    private fun getIndexesForTable(metaData: DatabaseMetaData, tableName: String): List<IndexInfo> {
+        val indexes = mutableListOf<IndexInfo>()
+        
+        // Primary Key bilgilerini al
+        metaData.getPrimaryKeys(null, null, tableName).use { primaryKeys ->
+            while (primaryKeys.next()) {
+                indexes.add(IndexInfo(
+                    name = "PRIMARY_KEY",
+                    columnName = primaryKeys.getString("COLUMN_NAME"),
+                    ordinalPosition = primaryKeys.getInt("KEY_SEQ"),
+                    isUnique = true,
+                    isPrimaryKey = true
+                ))
+            }
+        }
+        
+        // Diğer index bilgilerini al (non-PK)
+        metaData.getIndexInfo(null, null, tableName, false, true).use { indexInfo ->
+            while (indexInfo.next()) {
+                // 0 = tableIndexStatistic, 1 = tableIndexClustered, 2 = tableIndexHashed, 3 = tableIndexOther
+                if (indexInfo.getShort("TYPE") != DatabaseMetaData.tableIndexStatistic) {
+                    indexes.add(IndexInfo(
+                        name = indexInfo.getString("INDEX_NAME"),
+                        columnName = indexInfo.getString("COLUMN_NAME"),
+                        ordinalPosition = indexInfo.getInt("ORDINAL_POSITION"),
+                        isUnique = !indexInfo.getBoolean("NON_UNIQUE"),
+                        isPrimaryKey = false
+                    ))
+                }
+            }
+        }
+        
+        return indexes.sortedBy { it.name }
+    }
+    
+    // Hibernate'den entity tablo eşleşmelerini al
+    fun getHibernateTableMappings(): Map<String, String> {
+        val sessionFactory = entityManager.entityManagerFactory.unwrap(SessionFactory::class.java)
+        val metadata = sessionFactory.metamodel
+        return metadata.entities.associate { entity ->
+            entity.name to (entity.javaxEntity?.let { 
+                it.getAnnotation(javax.persistence.Table::class.java)?.name ?: entity.name.toLowerCase()
+            } ?: entity.name.toLowerCase())
+        }
+    }
+}
+
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.PathVariable
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+@RequestMapping("/api/tables")
+class TableIndexController(private val tableIndexExtractor: TableIndexExtractor) {
+    
+    @GetMapping
+    fun getAllTablesWithIndexes() = tableIndexExtractor.extractAllTablesWithIndexes()
+    
+    @GetMapping("/{tableName}/indexes")
+    fun getIndexesForTable(@PathVariable tableName: String) = 
+        tableIndexExtractor.getIndexesForTable(tableName)
+    
+    @GetMapping("/mappings")
+    fun getHibernateMappings() = tableIndexExtractor.getHibernateTableMappings()
+}
+
+import org.junit.jupiter.api.Test
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest
+import javax.persistence.Entity
+import javax.persistence.Id
+import javax.persistence.Index
+import javax.persistence.Table
+import org.assertj.core.api.Assertions.assertThat
+
+@DataJpaTest
+class TableIndexExtractorTest {
+    
+    @Autowired
+    private lateinit var tableIndexExtractor: TableIndexExtractor
+    
+    @Test
+    fun `should extract all tables with indexes`() {
+        val result = tableIndexExtractor.extractAllTablesWithIndexes()
+        
+        assertThat(result).isNotEmpty
+        assertThat(result.keys).anyMatch { it.name == "test_entity" }
+        
+        val testEntityIndexes = result.entries.first { it.key.name == "test_entity" }.value
+        assertThat(testEntityIndexes).anyMatch { it.isPrimaryKey && it.columnName == "id" }
+    }
+    
+    @Test
+    fun `should get indexes for specific table`() {
+        val indexes = tableIndexExtractor.getIndexesForTable("test_entity")
+        
+        assertThat(indexes).anyMatch { 
+            it.isPrimaryKey && it.columnName == "id" && it.name == "PRIMARY_KEY" 
+        }
+        
+        assertThat(indexes).anyMatch { 
+            !it.isPrimaryKey && it.columnName == "name" && it.name == "IDX_TEST_ENTITY_NAME" 
+        }
+    }
+    
+    @Test
+    fun `should get hibernate table mappings`() {
+        val mappings = tableIndexExtractor.getHibernateTableMappings()
+        
+        assertThat(mappings).containsEntry("TestEntity", "test_entity")
+    }
+}
+
+@Entity
+@Table(name = "test_entity", indexes = [
+    Index(name = "IDX_TEST_ENTITY_NAME", columnList = "name")
+])
+class TestEntity(
+    @Id
+    val id: Long = 0,
+    
+    val name: String = ""
+)
+
+@Service
+class DatabaseHealthService(
+    private val tableIndexExtractor: TableIndexExtractor
+) {
+    fun checkMissingIndexes(): List<String> {
+        val allTables = tableIndexExtractor.extractAllTablesWithIndexes()
+        val missingIndexes = mutableListOf<String>()
+        
+        allTables.forEach { (table, indexes) ->
+            if (indexes.none { !it.isPrimaryKey }) {
+                missingIndexes.add("Table ${table.name} has no secondary indexes")
+            }
+        }
+        
+        return missingIndexes
+    }
+}
+
+fun generateIndexCreationScripts(): String {
+    val allTables = tableIndexExtractor.extractAllTablesWithIndexes()
+    
+    return buildString {
+        appendLine("-- Index Creation Scripts")
+        allTables.forEach { (table, indexes) ->
+            indexes.filterNot { it.isPrimaryKey }.forEach { index ->
+                appendLine(
+                    "CREATE ${if (index.isUnique) "UNIQUE " else ""}INDEX ${index.name} " +
+                    "ON ${table.name} (${index.columnName});"
+                )
+            }
+        }
+    }
+}
