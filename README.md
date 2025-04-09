@@ -1,134 +1,92 @@
 import org.junit.jupiter.api.Test
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest
-import org.springframework.data.domain.PageRequest
-import org.springframework.data.domain.Sort
+import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.core.annotation.AnnotationUtils
+import org.springframework.stereotype.Component
+import org.springframework.stereotype.Repository
 import javax.persistence.EntityManager
 import kotlin.reflect.KClass
 import kotlin.reflect.KType
 import kotlin.reflect.full.*
 import kotlin.reflect.jvm.jvmErasure
 
-@DataJpaTest
-class UniversalRepositoryTest {
+@SpringBootTest
+class ComprehensiveRepositoryTest {
 
     @Autowired
-    lateinit var entityManager: EntityManager
+    private lateinit var entityManager: EntityManager
 
     @Autowired
-    lateinit var repositories: List<Any> // Tüm JPA repository'leri
-
-    // Temel test verileri
-    private val testData = mutableMapOf<KClass<*>, Any>()
+    private lateinit var applicationContext: ApplicationContext
 
     @Test
-    fun `test all repository methods dynamically`() {
-        repositories.forEach { repository ->
-            val repoClass = repository::class
-            println("\n⏳ Testing repository: ${repoClass.simpleName}")
-
-            repoClass.declaredMemberFunctions
-                .filterNot { it.name == "equals" || it.name == "hashCode" }
-                .forEach { function ->
+    fun `test all repository methods`() {
+        // 1. Tüm Spring bean'lerini al
+        val allBeans = applicationContext.beanDefinitionNames
+        
+        allBeans.forEach { beanName ->
+            val bean = applicationContext.getBean(beanName)
+            val beanClass = bean::class
+            
+            // 2. Sadece @Repository veya @Component ile işaretlenmiş sınıfları filtrele
+            if (isRepository(beanClass)) {
+                println("\nTesting repository: ${beanClass.simpleName}")
+                
+                // 3. Sınıftaki tüm metodları al (üst sınıflardaki Spring Data JPA metodlarını hariç tut)
+                val declaredMethods = beanClass.declaredMemberFunctions
+                    .filterNot { it.name.startsWith("get") || it.name.startsWith("set") }
+                    .filterNot { it.isAbstract }
+                
+                declaredMethods.forEach { method ->
                     try {
-                        val params = resolveParameters(function, repository)
-                        val result = function.call(repository, *params)
+                        // 4. Metod parametrelerini oluştur
+                        val params = resolveParameters(method.parameters.drop(1)) // 'this' parametresini atla
                         
-                        println("✅ ${repoClass.simpleName}.${function.name}() - " +
-                                "Params: ${params.joinToString()}, " +
-                                "Result: ${result?.toString()?.take(100)}...")
+                        // 5. Metodu çağır
+                        println("Calling: ${method.name} with params: ${params.joinToString()}")
+                        val result = method.call(bean, *params.toTypedArray())
                         
-                        // Result'ı entity ise testData'ya kaydet
-                        result?.let { cacheResultIfEntity(it) }
-                        if (result is Iterable<*>) {
-                            result.forEach { it?.let { cacheResultIfEntity(it) } }
-                        }
+                        // 6. Sonucu logla
+                        println("Result: ${result?.toString()?.take(100)}...")
+                        
+                        // 7. EntityManager'ı temizle
+                        entityManager.clear()
                     } catch (e: Exception) {
-                        println("❌ ${repoClass.simpleName}.${function.name}() - " +
-                               "Failed: ${e.message?.take(150)}")
+                        println("Failed to execute ${beanClass.simpleName}.${method.name}: ${e.message}")
                     }
                 }
+            }
         }
     }
 
-    private fun resolveParameters(function: KFunction<*>, repository: Any): Array<Any?> {
-        return function.parameters
-            .drop(1) // Receiver parametresini atla (repository instance'ı)
-            .map { param ->
-                when {
-                    // Spring Data'nın özel tipleri
-                    param.type.jvmErasure == PageRequest::class -> PageRequest.of(0, 10)
-                    param.type.jvmErasure == Sort::class -> Sort.unsorted()
-                    
-                    // Daha önce oluşturulmuş entity'ler
-                    testData.containsKey(param.type.jvmErasure) -> testData[param.type.jvmErasure]
-                    
-                    // Collection tipleri
-                    param.type.jvmErasure.isSubclassOf(Collection::class) -> 
-                        createCollectionForType(param.type)
-                    
-                    // Diğer kompleks tipler
-                    param.type.classifier is KClass<*> && 
-                    (param.type.classifier as KClass<*>).isData -> 
-                        createDataClassInstance(param.type)
-                    
-                    // Basit tipler
-                    else -> createSimpleValue(param.type)
+    private fun isRepository(clazz: KClass<*>): Boolean {
+        return clazz.hasAnnotation<Repository>() || 
+               clazz.hasAnnotation<Component>() ||
+               AnnotationUtils.findAnnotation(clazz.java, Repository::class.java) != null ||
+               AnnotationUtils.findAnnotation(clazz.java, Component::class.java) != null
+    }
+
+    private fun resolveParameters(parameters: List<KParameter>): List<Any?> {
+        return parameters.map { param ->
+            when (param.type.jvmErasure) {
+                String::class -> "test"
+                Int::class, Integer::class -> 1
+                Long::class, java.lang.Long::class -> 1L
+                Boolean::class -> true
+                List::class -> emptyList<Any>()
+                Pageable::class -> PageRequest.of(0, 10)
+                else -> {
+                    // Karmaşık tipler için örnek nesne oluştur
+                    try {
+                        param.type.jvmErasure.createInstance()
+                    } catch (e: Exception) {
+                        // JPA Entity'leri için boş instance
+                        entityManager.entityManagerFactory.metamodel.entities
+                            .firstOrNull { it.javaType == param.type.jvmErasure.java }
+                            ?.let { entityManager.find(it.javaType, 1) }
+                            ?: null
+                    }
                 }
-            }.toTypedArray()
-    }
-
-    private fun createCollectionForType(type: KType): Collection<*> {
-        val elementType = type.arguments.first().type!!
-        return when {
-            type.jvmErasure == List::class -> listOf(createValueForType(elementType))
-            type.jvmErasure == Set::class -> setOf(createValueForType(elementType))
-            else -> emptyList()
-        }
-    }
-
-    private fun createValueForType(type: KType): Any? {
-        return when (type.jvmErasure) {
-            String::class -> "test"
-            Long::class -> 1L
-            Int::class -> 1
-            Boolean::class -> true
-            else -> testData[type.jvmErasure] ?: createDataClassInstance(type)
-        }
-    }
-
-    private fun createDataClassInstance(type: KType): Any {
-        val kclass = type.jvmErasure
-        return kclass.primaryConstructor!!.let { constructor ->
-            constructor.parameters.associateWith { param ->
-                createValueForType(param.type)
-            }.let { argsMap ->
-                constructor.callBy(argsMap)
             }
-        }.also { instance ->
-            // Entity ise persist et
-            if (kclass.annotations.any { it.annotationClass == Entity::class }) {
-                entityManager.persist(instance)
-                entityManager.flush()
-                testData[kclass] = instance
-            }
-        }
-    }
-
-    private fun createSimpleValue(type: KType): Any {
-        return when (type.jvmErasure) {
-            String::class -> "test_value"
-            Long::class -> 1L
-            Int::class -> 42
-            Boolean::class -> true
-            Double::class -> 3.14
-            else -> throw IllegalArgumentException("Unsupported simple type: ${type.jvmErasure}")
-        }
-    }
-
-    private fun cacheResultIfEntity(obj: Any) {
-        val kclass = obj::class
-        if (kclass.annotations.any { it.annotationClass == Entity::class }) {
-            testData[kclass] = obj
         }
     }
 }
