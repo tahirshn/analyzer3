@@ -1,36 +1,48 @@
+#!/usr/bin/env python3
 import re
+from collections import OrderedDict
+import sys
 
-# Define the file paths
-input_file = 'input_file.txt'
-output_file = 'output_file.txt'
-
-def process_log_line(line):
-    # Use regex to extract the SQL query part from the log line
-    # Also remove any trailing "[]" characters
-    line = line.strip()
-    line = re.sub(r"\s*\[\s*\]\s*$", "", line)  # Remove empty "[]" at the end of the line
-    # Match SQL statements (e.g., select, insert, update, etc.)
-    match = re.search(r"(select|insert|update|delete|merge|alter|create|drop|truncate|rename|grant|revoke).*", line, re.IGNORECASE)
+def extract_sql_from_line(line):
+    """Log satırından SQL sorgusunu çıkarır"""
+    # Pattern: timestamp DEBUG ... org.hibernate.SQL : SQL_SORGUSU []
+    match = re.search(r'org\.hibernate\.SQL\s*:\s*(.*?)(\s*\[\])?$', line)
     if match:
-        return match.group(0).strip()  # Return the matched SQL query
+        return match.group(1).strip()
     return None
 
-def process_file(input_file, output_file):
-    # Create a set to store unique SQL queries
-    unique_queries = set()
+def process_log_file(input_file, output_file):
+    """Log dosyasını işler ve temizlenmiş SQL'leri yazar"""
+    unique_sqls = OrderedDict()
     
-    # Open input and output files
-    with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
-        for line in infile:
-            # Process each line
-            sql_query = process_log_line(line)
-            if sql_query:
-                # If the query is not already in the set, add it and write to output file
-                if sql_query not in unique_queries:
-                    unique_queries.add(sql_query)
-                    outfile.write(sql_query + '\n')
+    with open(input_file, 'r') as f:
+        for line in f:
+            sql = extract_sql_from_line(line)
+            if sql:
+                # Parametreleri standartlaştır
+                sql = re.sub(r'\?\d*', '?', sql)
+                sql = re.sub(r':[a-zA-Z0-9_]+', '?', sql)
+                # Fazla boşlukları temizle
+                sql = re.sub(r'\s+', ' ', sql).strip()
+                unique_sqls[sql] = None
+    
+    # SQL'leri dosyaya yaz
+    with open(output_file, 'w') as f:
+        for sql in unique_sqls.keys():
+            f.write(f"{sql}\n")
+    
+    return len(unique_sqls)
 
-# Process the input file and write unique queries to the output file
-process_file(input_file, output_file)
+def main():
+    if len(sys.argv) != 3:
+        print("Kullanım: python3 parse_sql_logs.py <input_log_file> <output_sql_file>")
+        sys.exit(1)
+    
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
+    
+    count = process_log_file(input_file, output_file)
+    print(f"Toplam {count} benzersiz SQL sorgusu bulundu ve {output_file} dosyasına yazıldı.")
 
-print(f"SQL queries have been successfully written to {output_file}.")
+if __name__ == "__main__":
+    main()
