@@ -1,41 +1,50 @@
-#!/usr/bin/env python3
-import re
-from collections import OrderedDict
-import sys
+package com.example.index
 
-def extract_sql_from_line(line):
-    """Log satırından SQL sorgusunu çıkarır"""
-    # Pattern: timestamp DEBUG ... org.hibernate.SQL : SQL_QUERY [parametreler]
-    match = re.search(r'org\.hibernate\.SQL\s*:\s*(.*?)(?:\s*\[.*\])?$', line)
-    if match:
-        return match.group(1).strip()
-    return None
+import jakarta.persistence.EntityManager
+import jakarta.persistence.PersistenceContext
+import org.junit.jupiter.api.Test
+import org.springframework.boot.test.context.SpringBootTest
 
-def main():
-    if len(sys.argv) != 3:
-        print("Kullanım: python3 parse_sql_logs.py <input_log_file> <output_sql_file>")
-        sys.exit(1)
-    
-    input_file = sys.argv[1]
-    output_file = sys.argv[2]
-    
-    unique_sqls = OrderedDict()
-    
-    with open(input_file, 'r') as f:
-        for line in f:
-            sql = extract_sql_from_line(line)
-            if sql:
-                # Parametreleri standartlaştır
-                sql = re.sub(r'\?\d*', '?', sql)
-                sql = re.sub(r'\s+', ' ', sql).strip()
-                unique_sqls[sql] = None
-    
-    with open(output_file, 'w') as f:
-        for sql in unique_sqls.keys():
-            f.write(f"{sql}\n")
-    
-    print(f"Toplam {len(unique_sqls)} benzersiz SQL sorgusu bulundu.")
-    print(f"Temizlenmiş SQL sorguları {output_file} dosyasına yazıldı.")
+@SpringBootTest
+class IndexInspectorTest {
 
-if __name__ == "__main__":
-    main()
+    @PersistenceContext
+    lateinit var entityManager: EntityManager
+
+    @Test
+    fun `should fetch and print table indexes without transaction`() {
+        val sql = """
+            SELECT 
+                t.relname AS table_name,
+                i.relname AS index_name,
+                a.attname AS column_name,
+                ix.indisunique AS is_unique,
+                ix.indisprimary AS is_primary
+            FROM 
+                pg_class t,
+                pg_class i,
+                pg_index ix,
+                pg_attribute a
+            WHERE 
+                t.oid = ix.indrelid
+                AND i.oid = ix.indexrelid
+                AND a.attrelid = t.oid
+                AND a.attnum = ANY(ix.indkey)
+                AND t.relkind = 'r'
+            ORDER BY
+                t.relname, i.relname
+        """.trimIndent()
+
+        val result = entityManager.createNativeQuery(sql).resultList
+
+        if (result.isEmpty()) {
+            println("❌ No indexes found.")
+        } else {
+            println("✅ Index list:")
+            result.forEach { row ->
+                val columns = row as Array<*>
+                println("Table: ${columns[0]}, Index: ${columns[1]}, Column: ${columns[2]}, Unique: ${columns[3]}, Primary: ${columns[4]}")
+            }
+        }
+    }
+}
