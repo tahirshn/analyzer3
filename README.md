@@ -1,75 +1,51 @@
-#!/bin/bash
-
-# Konfigürasyon
-TEST_CONFIG_FILE="src/test/resources/application-test.properties"
-RAW_LOG_FILE="build/sql_logs/raw_sql_output.log"
-FINAL_SQL_FILE="build/sql_logs/cleaned_sql_queries.log"
-GRADLE_COMMAND="./gradlew test --info"
-
-# Dizinleri oluştur
-mkdir -p "build/sql_logs"
-
-# Önceki log dosyalarını temizle
-> "$RAW_LOG_FILE"
-> "$FINAL_SQL_FILE"
-
-# Test için geçici log ayarlarını oluştur
-echo "Spring ve Hibernate log ayarları etkinleştiriliyor..."
-cat > "$TEST_CONFIG_FILE" << 'EOL'
-# Hibernate SQL Logging
-spring.jpa.show-sql=true
-spring.jpa.properties.hibernate.format_sql=true
-spring.jpa.properties.hibernate.use_sql_comments=true
-
-# Logging Levels
-logging.level.org.hibernate.SQL=DEBUG
-logging.level.org.hibernate.type=TRACE
-logging.level.org.hibernate.stat=DEBUG
-logging.level.org.hibernate.engine.QueryPlan=DEBUG
-
-# Log output to console
-logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{36} - %msg%n
-EOL
-
-echo "Testler çalıştırılıyor ve SQL sorguları loglanıyor..."
-$GRADLE_COMMAND > "$RAW_LOG_FILE" 2>&1
-
-echo "SQL sorguları temizleniyor ve parse ediliyor..."
-python3 - <<END
+#!/usr/bin/env python3
 import re
 from collections import OrderedDict
+import sys
 
-input_file = "build/sql_logs/raw_sql_output.log"
-output_file = "build/sql_logs/cleaned_sql_queries.log"
+def clean_sql(sql):
+    """SQL sorgusunu temizler ve standardize eder"""
+    # Parametreleri standartlaştır
+    sql = re.sub(r'\?\d*', '?', sql)
+    sql = re.sub(r':[a-zA-Z0-9_]+', '?', sql)
+    # Fazla boşlukları kaldır
+    sql = re.sub(r'\s+', ' ', sql).strip()
+    return sql
 
-# SQL sorgularını tanımlayan regex pattern
-sql_pattern = re.compile(r'(?:Hibernate:|org\.hibernate\.SQL.*-)\s*(.*)')
+def extract_unique_sqls(input_file):
+    """Log dosyasından benzersiz SQL sorgularını çıkarır"""
+    sql_pattern = re.compile(r'(?:Hibernate:|org\.hibernate\.SQL.*-)\s*(.*)')
+    unique_sqls = OrderedDict()
+    
+    with open(input_file, 'r') as f:
+        for line in f:
+            match = sql_pattern.search(line)
+            if match:
+                sql = match.group(1).strip()
+                if sql and sql.lower().startswith(('select', 'insert', 'update', 'delete', 'call', 'alter', 'create', 'drop')):
+                    cleaned_sql = clean_sql(sql)
+                    unique_sqls[cleaned_sql] = None
+    return unique_sqls
 
-# Tekrarsız SQL sorgularını saklamak için
-unique_sqls = OrderedDict()
+def write_sqls_to_file(unique_sqls, output_file):
+    """SQL sorgularını numaralandırılmış şekilde dosyaya yazar"""
+    with open(output_file, 'w') as f:
+        for i, sql in enumerate(unique_sqls.keys(), 1):
+            f.write(f"{i}. {sql}\n\n")
 
-with open(input_file, 'r') as f:
-    for line in f:
-        match = sql_pattern.search(line)
-        if match:
-            sql = match.group(1).strip()
-            if sql and not sql.startswith(('select', 'insert', 'update', 'delete', 'call', 'alter', 'create', 'drop')): 
-                continue
-            if sql:
-                # Parametreleri (?), :param gibi ifadelerle standartlaştır
-                sql = re.sub(r'\?\d*', '?', sql)
-                sql = re.sub(r':[a-zA-Z0-9_]+', '?', sql)
-                sql = re.sub(r'\s+', ' ', sql).strip()
-                unique_sqls[sql] = None
+def main():
+    if len(sys.argv) != 3:
+        print("Kullanım: python3 parse_sql_logs.py <input_log_file> <output_sql_file>")
+        sys.exit(1)
+    
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
+    
+    unique_sqls = extract_unique_sqls(input_file)
+    write_sqls_to_file(unique_sqls, output_file)
+    
+    print(f"Toplam {len(unique_sqls)} benzersiz SQL sorgusu bulundu.")
+    print(f"Temizlenmiş SQL sorguları {output_file} dosyasına yazıldı.")
 
-# Numaralandırılmış ve temizlenmiş SQL sorgularını yaz
-with open(output_file, 'w') as f:
-    for i, sql in enumerate(unique_sqls.keys(), 1):
-        f.write(f"{i}. {sql}\n\n")
-
-print(f"Toplam {len(unique_sqls)} benzersiz SQL sorgusu bulundu.")
-END
-
-echo -e "\nİşlem tamamlandı!"
-echo "Ham loglar: $RAW_LOG_FILE"
-echo "Temizlenmiş SQL sorguları: $FINAL_SQL_FILE"
+if __name__ == "__main__":
+    main()
