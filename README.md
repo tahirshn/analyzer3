@@ -77,3 +77,52 @@ if __name__ == "__main__":
     output_file = sys.argv[2] if len(sys.argv) > 2 else None
     
     extract_sql_queries(log_file, output_file)
+
+
+
+#!/usr/bin/env python3
+import re
+import sys
+
+def extract_unique_queries(log_file_path, output_file_path):
+    # SQL sorgularını tutacak küme (otomatik olarak benzersizlik sağlar)
+    unique_queries = set()
+    
+    # SQL sorgusu deseni (Hibernate formatına uygun)
+    sql_pattern = re.compile(r'^(?:Hibernate:|org\.hibernate\.SQL.*-)\s*(.*)$', re.MULTILINE)
+    
+    try:
+        with open(log_file_path, 'r', encoding='utf-8') as file:
+            content = file.read()
+            matches = sql_pattern.finditer(content)
+            
+            for match in matches:
+                query = match.group(1).strip()
+                # Sorguyu temizle ve kümede sakla
+                if query and not query.startswith('/*'):
+                    # Parametre değerlerini kaldır (?: için non-capturing group)
+                    cleaned_query = re.sub(r'\?(\d+)(?::\w+)?', '?', query)
+                    unique_queries.add(cleaned_query)
+                    
+    except FileNotFoundError:
+        print(f"Hata: Dosya bulunamadı - {log_file_path}")
+        sys.exit(1)
+    
+    # Benzersiz sorguları sıralı listeye çevir
+    sorted_queries = sorted(unique_queries)
+    
+    # Çıktı dosyasına yaz
+    with open(output_file_path, 'w', encoding='utf-8') as out_file:
+        for i, query in enumerate(sorted_queries, start=1):
+            out_file.write(f"{i}. {query}\n\n")
+    
+    print(f"Toplam {len(sorted_queries)} benzersiz SQL sorgusu '{output_file_path}' dosyasına kaydedildi.")
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Kullanım: python extract_sql.py <girdi_log_dosyası> <çıktı_dosyası>")
+        sys.exit(1)
+    
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
+    extract_unique_queries(input_file, output_file)
