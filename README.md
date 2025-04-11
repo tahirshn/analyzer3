@@ -1,68 +1,147 @@
 import re
 from collections import defaultdict
+import sqlparse
 
-class SQLQueryAnalyzer:
-    def __init__(self, sql):
-        self.sql = sql.strip().lower()
-        self.tables = defaultdict(list)  # tablonun ismi -> kolonlar
-        self.aliases = {}  # alias -> tablo adı
+def analyze_sql_file(file_path):
+    # SQL dosyasını oku
+    with open(file_path, 'r') as file:
+        sql_content = file.read()
     
-    def extract_tables_and_columns(self):
-        """SQL sorgusunda kullanılan tabloları ve kolonları ayıkla."""
-        # 1. FROM ve JOIN ifadelerinde yer alan tabloları çıkaralım
-        self._extract_from_and_joins()
-
-        # 2. WHERE ve ON kısımlarındaki kolonları çıkartalım
-        self._extract_columns_from_conditions()
-
-    def _extract_from_and_joins(self):
-        """FROM ve JOIN ifadelerinden tabloları çıkar."""
-        # Tabloları bulmak için FROM ve JOIN anahtar kelimelerini kullanıyoruz
-        from_and_joins = re.findall(r"\b(from|join)\s+([^\s,]+)", self.sql)
-        
-        for keyword, table in from_and_joins:
-            table_name = table.strip().split()[0]  # Alias kullanılıyorsa, önce tablonun adını al
-            if table_name not in self.aliases:
-                self.aliases[table_name] = table_name
-            else:
-                self.aliases[table_name] = table
-            
-            # Tabloyu ve kolonları ilişkilendir
-            self.tables[table_name] = []
-
-    def _extract_columns_from_conditions(self):
-        """WHERE ve ON koşullarındaki kolonları çıkar."""
-        # WHERE ve ON koşullarını bul
-        where_on_conditions = re.findall(r"(where|on)\s+([^\s;]+(?:[^\s;]+)*)", self.sql)
-        
-        for condition in where_on_conditions:
-            condition_str = condition[1].strip()
-            columns = re.findall(r"\b(\w+)\b", condition_str)  # Kolonları çıkart
-            for table, columns_in_condition in self.tables.items():
-                # Her tablodaki kolonları kaydedelim
-                self.tables[table].extend(columns)
-
-    def get_results(self):
-        return self.tables
-
-def analyze_sql_queries(file_path):
-    with open(file_path, 'r', encoding='utf-8') as file:
-        sql_queries = file.read().split(';')  # Sorguları ayır
-
-    for query in sql_queries:
-        query = query.strip()
-        if not query:
+    # Sorguları ayır
+    queries = sqlparse.split(sql_content)
+    
+    # Analiz sonuçlarını sakla
+    analysis_results = []
+    
+    for query in queries:
+        if not query.strip():
             continue
+            
+        try:
+            parsed = sqlparse.parse(query)[0]
+            analysis = analyze_query(parsed)
+            if analysis:
+                analysis_results.append(analysis)
+        except Exception as e:
+            print(f"Query analysis error: {e}")
+            continue
+    
+    return analysis_results
+
+def analyze_query(parsed_query):
+    # Temel bilgileri topla
+    tables = set()
+    join_columns = defaultdict(set)
+    where_columns = set()
+    order_by_columns = set()
+    group_by_columns = set()
+    
+    # FROM clause analizi
+    for token in parsed_query.tokens:
+        if isinstance(token, sqlparse.sql.IdentifierList):
+            for identifier in token.get_identifiers():
+                tables.add(identifier.get_real_name())
+        elif isinstance(token, sqlparse.sql.Identifier):
+            tables.add(token.get_real_name())
+    
+    # WHERE clause analizi
+    where_clause = None
+    for token in parsed_query.tokens:
+        if isinstance(token, sqlparse.sql.Where):
+            where_clause = token
+            break
+    
+    if where_clause:
+        for token in where_clause.tokens:
+            if isinstance(token, sqlparse.sql.Comparison):
+                left = token.left.value
+                where_columns.add(left)
+    
+    # JOIN analizi (basitleştirilmiş)
+    join_keywords = ['join', 'inner join', 'left join', 'right join']
+    for token in parsed_query.tokens:
+        if token.value.lower() in join_keywords:
+            # Basit JOIN analizi - gerçekte daha karmaşık olmalı
+            next_token = parsed_query.token_next(token)[1]
+            if next_token:
+                join_columns[next_token.get_real_name()].add(token.value)
+    
+    # ORDER BY ve GROUP BY analizi
+    for token in parsed_query.tokens:
+        if isinstance(token, sqlparse.sql.IdentifierList):
+            if any(t.value.lower() == 'order by' for t in token.tokens):
+                order_by_columns.update(get_columns_from_list(token))
+            elif any(t.value.lower() == 'group by' for t in token.tokens):
+                group_by_columns.update(get_columns_from_list(token))
+    
+    # Index önerilerini oluştur
+    index_recommendations = generate_index_recommendations(
+        tables, join_columns, where_columns, order_by_columns, group_by_columns
+    )
+    
+    return {
+        'query': str(parsed_query),
+        'tables': list(tables),
+        'join_columns': dict(join_columns),
+        'where_columns': list(where_columns),
+        'order_by_columns': list(order_by_columns),
+        'group_by_columns': list(group_by_columns),
+        'index_recommendations': index_recommendations
+    }
+
+def get_columns_from_list(token_list):
+    columns = set()
+    for identifier in token_list.get_identifiers():
+        columns.add(identifier.get_real_name())
+    return columns
+
+def generate_index_recommendations(tables, join_columns, where_columns, order_by, group_by):
+    recommendations = []
+    
+    # JOIN için index önerileri
+    for table, joins in join_columns.items():
+        for join_type in joins:
+            recommendations.append(
+                f"CREATE INDEX idx_{table}_join ON {table}({', '.join(join_columns[table])}); -- JOIN optimizasyonu"
+            )
+    
+    # WHERE için index önerileri
+    for column in where_columns:
+        recommendations.append(
+            f"CREATE INDEX idx_{column}_filter ON {column.split('.')[0]}({column.split('.')[-1]}); -- WHERE koşulu optimizasyonu"
+        )
+    
+    # ORDER BY/GROUP BY için index önerileri
+    if order_by:
+        recommendations.append(
+            f"CREATE INDEX idx_ordering ON {order_by[0].split('.')[0]}({', '.join([col.split('.')[-1] for col in order_by])}); -- ORDER BY optimizasyonu"
+        )
+    
+    if group_by:
+        recommendations.append(
+            f"CREATE INDEX idx_grouping ON {group_by[0].split('.')[0]}({', '.join([col.split('.')[-1] for col in group_by])}); -- GROUP BY optimizasyonu"
+        )
+    
+    return recommendations
+
+def main():
+    file_path = 'output_raw_sql.txt'  # Varsayılan dosya yolu
+    results = analyze_sql_file(file_path)
+    
+    # Sonuçları yazdır
+    for i, result in enumerate(results, 1):
+        print(f"\n=== Sorgu {i} Analizi ===")
+        print(f"\nTablo(lar): {', '.join(result['tables'])}")
+        print(f"\nJOIN Sütunları: {result['join_columns']}")
+        print(f"\nWHERE Sütunları: {', '.join(result['where_columns'])}")
+        print(f"\nORDER BY Sütunları: {', '.join(result['order_by_columns'])}")
+        print(f"\nGROUP BY Sütunları: {', '.join(result['group_by_columns'])}")
         
-        analyzer = SQLQueryAnalyzer(query)
-        analyzer.extract_tables_and_columns()
-        tables_and_columns = analyzer.get_results()
+        print("\nÖnerilen Indexler:")
+        for rec in result['index_recommendations']:
+            print(f"- {rec}")
+        
+        print("\n" + "="*50 + "\n")
 
-        print(f"Analyzing Query: {query}")
-        for table, columns in tables_and_columns.items():
-            print(f"Table: {table}")
-            print(f"Columns: {set(columns)}")  # Set yapısı ile tekrarlanan kolonları engeller
-        print("-" * 50)
-
-# Kullanım
-analyze_sql_queries('output_raw_sql.txt')
+if __name__ == "__main__":
+    main()
