@@ -1,5 +1,5 @@
 import sqlparse
-from sqlparse.sql import Identifier, Comparison, Parenthesis
+from sqlparse.sql import Identifier, Comparison, Parenthesis, Where
 from sqlparse.tokens import Keyword, Punctuation
 from typing import List, Dict, Any
 import json
@@ -19,16 +19,21 @@ class SQLQueryAnalyzer:
         statements = sqlparse.parse(sql_content)
         
         for statement in statements:
+            # Skip empty statements and non-SELECT statements
+            if not statement.is_group or not self._is_select_statement(statement):
+                continue
+                
             self._analyze_statement(statement)
             
         return self.queries
 
+    def _is_select_statement(self, statement) -> bool:
+        """Check if the statement is a SELECT statement"""
+        first_token = statement.token_first(skip_ws=True, skip_cm=True)
+        return first_token and first_token.value.upper() == 'SELECT'
+
     def _analyze_statement(self, statement):
         """Analyze a single SQL statement"""
-        # Skip non-SELECT statements and empty statements
-        if not statement.is_select():
-            return
-            
         self.query_id += 1
         self.current_query = {
             "query_id": self.query_id,
@@ -38,16 +43,8 @@ class SQLQueryAnalyzer:
             "where_conditions": []
         }
         
-        # Extract FROM clause
-        from_seen = False
-        for token in statement.tokens:
-            if from_seen:
-                if token.ttype is Keyword and token.value.upper() in ['WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT']:
-                    break
-                self._process_from_token(token)
-            
-            if token.ttype is Keyword and token.value.upper() == 'FROM':
-                from_seen = True
+        # Process the FROM clause
+        self._extract_from_clause(statement)
         
         # Extract JOIN clauses
         self._extract_joins(statement)
@@ -57,10 +54,21 @@ class SQLQueryAnalyzer:
         
         self.queries.append(self.current_query)
 
+    def _extract_from_clause(self, statement):
+        """Extract tables from FROM clause"""
+        from_seen = False
+        for token in statement.tokens:
+            if from_seen:
+                if token.ttype is Keyword and token.value.upper() in ['WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT']:
+                    break
+                self._process_from_token(token)
+            
+            if token.ttype is Keyword and token.value.upper() == 'FROM':
+                from_seen = True
+
     def _process_from_token(self, token):
         """Process tokens in FROM clause"""
         if isinstance(token, Identifier):
-            # Handle table with or without alias
             table_name = token.get_real_name()
             alias = token.get_alias() or table_name
             self.current_query["tables"].append({
@@ -83,8 +91,11 @@ class SQLQueryAnalyzer:
         """Process a single JOIN token"""
         join_type = token.value.upper().replace('JOIN', '').strip() or 'INNER'
         
-        # Get the next token which should be the join target
+        # Get the join target (table being joined)
         join_idx = token.parent.tokens.index(token)
+        if join_idx + 1 >= len(token.parent.tokens):
+            return None
+            
         join_target = token.parent.tokens[join_idx + 1]
         
         if not isinstance(join_target, Identifier):
@@ -115,51 +126,55 @@ class SQLQueryAnalyzer:
         for i in range(start_idx + 2, len(parent_token.tokens)):
             token = parent_token.tokens[i]
             if token.ttype is Keyword and token.value.upper() == 'ON':
-                return parent_token.tokens[i + 1]
+                if i + 1 < len(parent_token.tokens):
+                    return parent_token.tokens[i + 1]
             if token.ttype is Keyword and token.value.upper() in ['WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT']:
                 break
         return None
 
     def _extract_where_conditions(self, statement):
         """Extract WHERE conditions from statement"""
-        where_token = None
+        where_seen = False
         for token in statement.tokens:
-            if token.ttype is Keyword and token.value.upper() == 'WHERE':
-                where_token = token
+            if where_seen:
+                if isinstance(token, Where):
+                    self._process_where_clause(token)
                 break
                 
-        if not where_token:
-            return
-            
-        # Get the next token after WHERE
-        where_idx = statement.tokens.index(where_token)
-        if where_idx + 1 >= len(statement.tokens):
-            return
-            
-        where_expr = statement.tokens[where_idx + 1]
-        conditions = self._split_where_conditions(where_expr)
+            if token.ttype is Keyword and token.value.upper() == 'WHERE':
+                where_seen = True
+
+    def _process_where_clause(self, where_token):
+        """Process WHERE clause and extract conditions"""
+        conditions = self._split_where_conditions(where_token)
         
         for condition in conditions:
             columns = self._extract_columns_from_expression(condition)
             self.current_query["where_conditions"].append({
-                "condition": str(condition),
+                "condition": str(condition).strip(),
                 "columns": columns
             })
 
-    def _split_where_conditions(self, where_expr) -> List:
-        """Split WHERE expression into individual conditions"""
+    def _split_where_conditions(self, where_token) -> List:
+        """Split WHERE clause into individual conditions"""
         conditions = []
+        current_condition = []
         
-        # Simple split by AND/OR - could be improved
-        for token in where_expr.tokens:
+        for token in where_token.tokens:
             if token.is_whitespace:
                 continue
                 
             if (isinstance(token, sqlparse.sql.TokenList) and \
                (token.value.upper() in ['AND', 'OR']):
+                if current_condition:
+                    conditions.append(sqlparse.sql.TokenList(current_condition))
+                    current_condition = []
                 continue
                 
-            conditions.append(token)
+            current_condition.append(token)
+        
+        if current_condition:
+            conditions.append(sqlparse.sql.TokenList(current_condition))
             
         return conditions
 
@@ -171,14 +186,16 @@ class SQLQueryAnalyzer:
             if isinstance(token, Identifier):
                 # Handle table.column format
                 if '.' in token.value:
-                    table, column = token.value.split('.')[:2]
-                    columns.append({
-                        "table": table,
-                        "column": column
-                    })
+                    parts = token.value.split('.')
+                    if len(parts) >= 2:
+                        columns.append({
+                            "table": parts[0],
+                            "column": parts[1]
+                        })
             elif isinstance(token, Comparison):
                 # Handle comparison operators
-                left, op, right = token.left, token.token_next(0)[1], token.right
+                left = token.left
+                right = token.right
                 columns.extend(self._extract_columns_from_expression(left))
                 columns.extend(self._extract_columns_from_expression(right))
             elif isinstance(token, Parenthesis):
