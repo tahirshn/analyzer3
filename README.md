@@ -1,178 +1,232 @@
-import re
-import json
+import sqlparse
+from sqlparse.sql import Identifier, Comparison, Parenthesis
+from sqlparse.tokens import Keyword, Punctuation
 from typing import List, Dict, Any
+import json
 
-class SQLQueryParser:
+class SQLQueryAnalyzer:
     def __init__(self):
         self.queries = []
         self.current_query = None
-        self.query_buffer = []
         self.query_id = 0
 
-    def parse_sql_file(self, file_path: str) -> List[Dict[str, Any]]:
-        """Parse SQL file line by line and extract queries"""
+    def analyze_sql_file(self, file_path: str) -> List[Dict[str, Any]]:
+        """Analyze SQL file using sqlparse"""
         with open(file_path, 'r') as file:
-            for line in file:
-                line = line.strip()
-                
-                # Skip empty lines and comments
-                if not line or line.startswith('--'):
-                    continue
-                    
-                # Add line to buffer
-                self.query_buffer.append(line)
-                
-                # Check if line ends a query (even without semicolon)
-                if self._is_query_end(line):
-                    self._process_query_buffer()
-                    
+            sql_content = file.read()
+        
+        # Parse SQL content into statements
+        statements = sqlparse.parse(sql_content)
+        
+        for statement in statements:
+            self._analyze_statement(statement)
+            
         return self.queries
 
-    def _is_query_end(self, line: str) -> bool:
-        """Determine if the line likely ends a query"""
-        # Common query-ending keywords (case insensitive)
-        end_keywords = {
-            'select', 'insert', 'update', 'delete', 'create', 'drop', 
-            'alter', 'with', '--', '/*'
-        }
-        
-        # If line ends with semicolon or starts a new query
-        return (line.endswith(';') or 
-                any(line.lower().startswith(kw) for kw in end_keywords))
-
-    def _process_query_buffer(self):
-        """Process the accumulated query lines"""
-        if not self.query_buffer:
-            return
-            
-        # Combine lines into a single query string
-        query_text = ' '.join(self.query_buffer).strip()
-        self.query_buffer = []
-        
-        # Remove trailing semicolon if exists
-        if query_text.endswith(';'):
-            query_text = query_text[:-1]
-            
-        # Only process SELECT queries (can be extended for others)
-        if not query_text.lower().startswith('select'):
+    def _analyze_statement(self, statement):
+        """Analyze a single SQL statement"""
+        # Skip non-SELECT statements and empty statements
+        if not statement.is_select():
             return
             
         self.query_id += 1
         self.current_query = {
             "query_id": self.query_id,
-            "query_text": query_text,
+            "query_text": str(statement).strip(),
+            "tables": [],
             "joins": [],
             "where_conditions": []
         }
         
-        self._extract_joins(query_text)
-        self._extract_where_conditions(query_text)
+        # Extract FROM clause
+        from_seen = False
+        for token in statement.tokens:
+            if from_seen:
+                if token.ttype is Keyword and token.value.upper() in ['WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT']:
+                    break
+                self._process_from_token(token)
+            
+            if token.ttype is Keyword and token.value.upper() == 'FROM':
+                from_seen = True
+        
+        # Extract JOIN clauses
+        self._extract_joins(statement)
+        
+        # Extract WHERE conditions
+        self._extract_where_conditions(statement)
         
         self.queries.append(self.current_query)
 
-    def _extract_joins(self, query: str):
-        """Extract JOIN conditions and identify tables/columns"""
-        # Find all JOIN clauses (case insensitive)
-        join_matches = re.finditer(
-            r'(?:INNER\s+|LEFT\s+|RIGHT\s+|FULL\s+)?JOIN\s+(\w+)(?:\s+AS\s+)?(\w+)?\s+ON\s+([^)]+)',
-            query, 
-            re.IGNORECASE
-        )
-        
-        for match in join_matches:
-            table = match.group(1)
-            alias = match.group(2) if match.group(2) else table
-            condition = match.group(3).strip()
-            
-            # Extract columns used in the JOIN condition
-            columns = self._extract_columns_from_condition(condition)
-            
-            self.current_query["joins"].append({
-                "table": table,
-                "alias": alias,
-                "condition": condition,
-                "columns": columns
+    def _process_from_token(self, token):
+        """Process tokens in FROM clause"""
+        if isinstance(token, Identifier):
+            # Handle table with or without alias
+            table_name = token.get_real_name()
+            alias = token.get_alias() or table_name
+            self.current_query["tables"].append({
+                "table": table_name,
+                "alias": alias
             })
 
-    def _extract_where_conditions(self, query: str):
-        """Extract WHERE conditions and identify tables/columns"""
-        # Find WHERE clause (case insensitive)
-        where_match = re.search(
-            r'WHERE\s+(.*?)(?:\s+(?:GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|$)', 
-            query, 
-            re.IGNORECASE | re.DOTALL
-        )
+    def _extract_joins(self, statement):
+        """Extract JOIN information from statement"""
+        for token in statement.tokens:
+            if isinstance(token, sqlparse.sql.TokenList):
+                if token.ttype is Keyword and token.value.upper().endswith('JOIN'):
+                    join_info = self._process_join_token(token)
+                    if join_info:
+                        self.current_query["joins"].append(join_info)
+                # Recursively check nested tokens
+                self._extract_joins(token)
+
+    def _process_join_token(self, token) -> Dict[str, Any]:
+        """Process a single JOIN token"""
+        join_type = token.value.upper().replace('JOIN', '').strip() or 'INNER'
         
-        if not where_match:
+        # Get the next token which should be the join target
+        join_idx = token.parent.tokens.index(token)
+        join_target = token.parent.tokens[join_idx + 1]
+        
+        if not isinstance(join_target, Identifier):
+            return None
+            
+        table_name = join_target.get_real_name()
+        alias = join_target.get_alias() or table_name
+        
+        # Find ON condition
+        on_condition = None
+        on_clause = self._find_on_clause(token.parent, join_idx)
+        if on_clause:
+            on_condition = str(on_clause)
+            columns = self._extract_columns_from_expression(on_clause)
+        else:
+            columns = []
+        
+        return {
+            "type": join_type,
+            "table": table_name,
+            "alias": alias,
+            "condition": on_condition,
+            "columns": columns
+        }
+
+    def _find_on_clause(self, parent_token, start_idx):
+        """Find ON clause following a JOIN"""
+        for i in range(start_idx + 2, len(parent_token.tokens)):
+            token = parent_token.tokens[i]
+            if token.ttype is Keyword and token.value.upper() == 'ON':
+                return parent_token.tokens[i + 1]
+            if token.ttype is Keyword and token.value.upper() in ['WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT']:
+                break
+        return None
+
+    def _extract_where_conditions(self, statement):
+        """Extract WHERE conditions from statement"""
+        where_token = None
+        for token in statement.tokens:
+            if token.ttype is Keyword and token.value.upper() == 'WHERE':
+                where_token = token
+                break
+                
+        if not where_token:
             return
             
-        where_clause = where_match.group(1)
-        
-        # Split conditions (simple split by AND/OR)
-        conditions = re.split(r'\s+(?:AND|OR)\s+', where_clause, flags=re.IGNORECASE)
+        # Get the next token after WHERE
+        where_idx = statement.tokens.index(where_token)
+        if where_idx + 1 >= len(statement.tokens):
+            return
+            
+        where_expr = statement.tokens[where_idx + 1]
+        conditions = self._split_where_conditions(where_expr)
         
         for condition in conditions:
-            condition = condition.strip()
-            if not condition:
-                continue
-                
-            # Extract columns used in the condition
-            columns = self._extract_columns_from_condition(condition)
-            
+            columns = self._extract_columns_from_expression(condition)
             self.current_query["where_conditions"].append({
-                "condition": condition,
+                "condition": str(condition),
                 "columns": columns
             })
 
-    def _extract_columns_from_condition(self, condition: str) -> List[Dict[str, str]]:
-        """Extract table and column references from a condition"""
-        # Pattern to match table.column references
-        column_pattern = re.compile(r'(\w+)\.(\w+)')
+    def _split_where_conditions(self, where_expr) -> List:
+        """Split WHERE expression into individual conditions"""
+        conditions = []
+        
+        # Simple split by AND/OR - could be improved
+        for token in where_expr.tokens:
+            if token.is_whitespace:
+                continue
+                
+            if (isinstance(token, sqlparse.sql.TokenList) and \
+               (token.value.upper() in ['AND', 'OR']):
+                continue
+                
+            conditions.append(token)
+            
+        return conditions
+
+    def _extract_columns_from_expression(self, expr) -> List[Dict[str, str]]:
+        """Extract table.column references from an expression"""
         columns = []
         
-        for match in column_pattern.finditer(condition):
-            table = match.group(1)
-            column = match.group(2)
-            columns.append({
-                "table": table,
-                "column": column
-            })
-            
+        for token in expr.tokens:
+            if isinstance(token, Identifier):
+                # Handle table.column format
+                if '.' in token.value:
+                    table, column = token.value.split('.')[:2]
+                    columns.append({
+                        "table": table,
+                        "column": column
+                    })
+            elif isinstance(token, Comparison):
+                # Handle comparison operators
+                left, op, right = token.left, token.token_next(0)[1], token.right
+                columns.extend(self._extract_columns_from_expression(left))
+                columns.extend(self._extract_columns_from_expression(right))
+            elif isinstance(token, Parenthesis):
+                # Handle expressions in parentheses
+                columns.extend(self._extract_columns_from_expression(token))
+            elif isinstance(token, sqlparse.sql.TokenList):
+                # Recursively check nested tokens
+                columns.extend(self._extract_columns_from_expression(token))
+                
         return columns
 
-    def print_analysis_results(self):
-        """Print the analysis results in a readable format"""
+    def print_analysis(self):
+        """Print analysis results in readable format"""
         for query in self.queries:
             print(f"\n=== Query {query['query_id']} ===")
             print(f"Full query: {query['query_text']}\n")
             
-            print("JOIN Conditions:")
+            print("Tables:")
+            for table in query['tables']:
+                print(f"- {table['table']} (as {table['alias']})")
+            
+            print("\nJOINs:")
             for join in query['joins']:
-                print(f"- Table: {join['table']} (alias: {join['alias']})")
-                print(f"  Condition: {join['condition']}")
+                print(f"- {join['type']} JOIN {join['table']} (as {join['alias']})")
+                print(f"  ON {join['condition']}")
                 print("  Columns used:")
                 for col in join['columns']:
                     print(f"    - {col['table']}.{col['column']}")
-                print()
             
-            print("WHERE Conditions:")
-            for where in query['where_conditions']:
-                print(f"- Condition: {where['condition']}")
+            print("\nWHERE Conditions:")
+            for condition in query['where_conditions']:
+                print(f"- {condition['condition']}")
                 print("  Columns used:")
-                for col in where['columns']:
+                for col in condition['columns']:
                     print(f"    - {col['table']}.{col['column']}")
-                print()
+            
+            print("\n" + "="*50)
 
 # Example usage
 if __name__ == "__main__":
-    parser = SQLQueryParser()
+    analyzer = SQLQueryAnalyzer()
     
-    # Parse the SQL file
-    queries = parser.parse_sql_file("sql_queries.sql")  # Replace with your file path
+    # Analyze SQL file
+    queries = analyzer.analyze_sql_file("sql_queries.sql")
     
-    # Print analysis results
-    parser.print_analysis_results()
+    # Print results
+    analyzer.print_analysis()
     
-    # Optionally save to JSON
+    # Save to JSON
     with open("sql_analysis.json", "w") as f:
         json.dump(queries, f, indent=2)
