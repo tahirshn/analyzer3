@@ -1,200 +1,116 @@
 import re
-from collections import defaultdict
 
-def analyze_sql_file(file_path):
-    """SQL dosyasını okuyup sorguları analiz eder."""
+class SQLQueryAnalyzer:
+    def __init__(self, sql):
+        self.sql = sql.strip().lower()
+        self.tables = set()
+        self.columns = set()
+        self.joins = []
+        self.where_conditions = []
+        self.order_by_columns = set()
+        self.group_by_columns = set()
+        self.subqueries = []
+
+    def analyze(self):
+        """SQL sorgusunu analiz et."""
+        self.extract_tables_and_columns()
+        self.extract_joins()
+        self.extract_conditions()
+        self.extract_order_by_and_group_by()
+        self.extract_subqueries()
+
+    def extract_tables_and_columns(self):
+        """SQL sorgusundaki tablolardan ve kolonlardan bilgileri çıkar."""
+        # Tabloları ve kolonları FROM, JOIN ve WHERE ifadelerinden alalım
+        tables_and_columns = re.findall(r'(\bfrom\b|\bjoin\b)\s+(\w+)(?:\s+as\s+(\w+))?', self.sql)
+        
+        for keyword, table, alias in tables_and_columns:
+            table_name = alias if alias else table
+            self.tables.add(table_name)
+
+            # Kolonları WHERE, JOIN ve SELECT içinde arayalım
+            columns_in_table = re.findall(r'\b' + re.escape(table_name) + r'\.(\w+)', self.sql)
+            self.columns.update(columns_in_table)
+
+    def extract_joins(self):
+        """JOIN ifadelerinde kullanılan kolonları çıkar."""
+        join_conditions = re.findall(r'\b(on|using)\s+([^\s;]+)', self.sql)
+        
+        for condition in join_conditions:
+            join_condition = condition[1]
+            columns_in_join = re.findall(r'(\w+)', join_condition)
+            self.columns.update(columns_in_join)
+
+    def extract_conditions(self):
+        """WHERE koşullarındaki kolonları çıkar."""
+        where_conditions = re.findall(r'\bwhere\b\s+([^\s;]+)', self.sql)
+        
+        for condition in where_conditions:
+            columns_in_condition = re.findall(r'(\w+)', condition)
+            self.columns.update(columns_in_condition)
+
+    def extract_order_by_and_group_by(self):
+        """ORDER BY ve GROUP BY koşullarındaki kolonları çıkar."""
+        order_by_columns = re.findall(r'\border by\b\s+([^\s;]+)', self.sql)
+        group_by_columns = re.findall(r'\bgroup by\b\s+([^\s;]+)', self.sql)
+        
+        self.order_by_columns.update(order_by_columns)
+        self.group_by_columns.update(group_by_columns)
+
+    def extract_subqueries(self):
+        """Alt sorgulardaki kolonları çıkar."""
+        subqueries = re.findall(r'\(.*?\)', self.sql)
+        self.subqueries.extend(subqueries)
+
+    def get_analysis(self):
+        """Sorgunun analizini döndüren fonksiyon."""
+        return {
+            "tables": self.tables,
+            "columns": self.columns,
+            "joins": self.joins,
+            "where_conditions": self.where_conditions,
+            "order_by_columns": self.order_by_columns,
+            "group_by_columns": self.group_by_columns,
+            "subqueries": self.subqueries
+        }
+
+def analyze_sql_queries(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
-        sql_content = file.read()
-    
-    # Sorguları ayır (basit regex ile)
-    queries = re.split(r';\s*\n', sql_content)
-    analysis_results = []
-    
-    for query in queries:
+        sql_queries = file.read().split(';')  # Sorguları ayır
+
+    for query in sql_queries:
         query = query.strip()
-        if not query or query.startswith('--'):
+        if not query:
             continue
-            
-        try:
-            analysis = analyze_query(query)
-            if analysis:
-                analysis_results.append(analysis)
-        except Exception as e:
-            print(f"Sorgu analiz hatası: {str(e)}")
-            continue
-    
-    return analysis_results
-
-def analyze_query(query):
-    """Tek bir SQL sorgusunu analiz eder."""
-    # Case insensitive analiz için küçük harfe çevir
-    lower_query = query.lower()
-    
-    # Temel bilgileri topla
-    tables = extract_tables(query)
-    join_columns = extract_join_columns(query)
-    where_columns = extract_where_columns(query)
-    order_by_columns = extract_order_by_columns(query)
-    group_by_columns = extract_group_by_columns(query)
-    
-    # Index önerilerini oluştur
-    index_recommendations = generate_index_recommendations(
-        tables, join_columns, where_columns, order_by_columns, group_by_columns
-    )
-    
-    return {
-        'query': query,
-        'tables': tables,
-        'join_columns': join_columns,
-        'where_columns': where_columns,
-        'order_by_columns': order_by_columns,
-        'group_by_columns': group_by_columns,
-        'index_recommendations': index_recommendations
-    }
-
-def extract_tables(query):
-    """FROM clause'dan tablo isimlerini çıkarır."""
-    # Basit regex yaklaşımı
-    tables = set()
-    from_match = re.search(r'from\s+([^\s,(]+)(?:\s*,\s*([^\s,(]+))?', query, re.I)
-    if from_match:
-        tables.update(t for t in from_match.groups() if t)
-    
-    # JOIN ifadelerinden tablolar
-    join_matches = re.finditer(r'(?:inner|left|right|full)\s+join\s+([^\s,]+)', query, re.I)
-    tables.update(m.group(1) for m in join_matches)
-    
-    return list(tables)
-
-def extract_join_columns(query):
-    """JOIN koşullarındaki sütunları çıkarır."""
-    joins = defaultdict(set)
-    join_matches = re.finditer(r'on\s+([^=]+)\s*=\s*([^)\s,]+)', query, re.I)
-    
-    for match in join_matches:
-        left, right = match.groups()
-        left_table = left.split('.')[0] if '.' in left else None
-        right_table = right.split('.')[0] if '.' in right else None
         
-        if left_table:
-            joins[left_table].add(left.split('.')[-1])
-        if right_table:
-            joins[right_table].add(right.split('.')[-1])
-    
-    return dict(joins)
+        analyzer = SQLQueryAnalyzer(query)
+        analyzer.analyze()
+        analysis = analyzer.get_analysis()
 
-def extract_where_columns(query):
-    """WHERE clause'daki sütunları çıkarır."""
-    where_columns = set()
-    where_pos = query.lower().find('where')
-    if where_pos == -1:
-        return []
-    
-    where_part = query[where_pos+5:]
-    # Basit koşulları bul
-    conditions = re.split(r'\band\b|\bor\b', where_part, flags=re.I)
-    
-    for cond in conditions:
-        # Sütun adını bulmaya çalış
-        match = re.search(r'([a-z_][a-z0-9_]*)(?:\.[a-z_][a-z0-9_]*)?\s*[=<>]', cond, re.I)
-        if match:
-            col = match.group(1)
-            if '.' in col:
-                col = col.split('.')[-1]
-            where_columns.add(col)
-    
-    return list(where_columns)
-
-def extract_order_by_columns(query):
-    """ORDER BY sütunlarını çıkarır."""
-    order_match = re.search(r'order\s+by\s+([^);]+)', query, re.I)
-    if not order_match:
-        return []
-    
-    order_part = order_match.group(1)
-    columns = re.findall(r'([a-z_][a-z0-9_]*)(?:\.[a-z_][a-z0-9_]*)?(?:\s+asc|\s+desc)?', order_part, re.I)
-    return [col[0].split('.')[-1] for col in columns]
-
-def extract_group_by_columns(query):
-    """GROUP BY sütunlarını çıkarır."""
-    group_match = re.search(r'group\s+by\s+([^);]+)', query, re.I)
-    if not group_match:
-        return []
-    
-    group_part = group_match.group(1)
-    columns = re.findall(r'([a-z_][a-z0-9_]*)(?:\.[a-z_][a-z0-9_]*)?', group_part, re.I)
-    return [col.split('.')[-1] for col in columns]
-
-def generate_index_recommendations(tables, join_columns, where_columns, order_by, group_by):
-    """Analiz sonuçlarına göre index önerileri üretir."""
-    recommendations = []
-    
-    # JOIN sütunları için index
-    for table, columns in join_columns.items():
-        if table in tables and columns:
-            rec = f"CREATE INDEX idx_{table}_join ON {table}({', '.join(columns)});  -- JOIN optimizasyonu"
-            recommendations.append(rec)
-    
-    # WHERE sütunları için index
-    for column in where_columns:
-        if column:
-            # Hangi tabloya ait olduğunu bul
-            table = find_table_for_column(tables, column)
-            if table:
-                rec = f"CREATE INDEX idx_{table}_{column} ON {table}({column});  -- WHERE koşulu optimizasyonu"
-                recommendations.append(rec)
-    
-    # ORDER BY için composite index
-    if order_by and len(order_by) > 0:
-        table = find_table_for_column(tables, order_by[0])
-        if table:
-            rec = f"CREATE INDEX idx_{table}_order ON {table}({', '.join(order_by)});  -- ORDER BY optimizasyonu"
-            recommendations.append(rec)
-    
-    # GROUP BY için composite index
-    if group_by and len(group_by) > 0:
-        table = find_table_for_column(tables, group_by[0])
-        if table:
-            rec = f"CREATE INDEX idx_{table}_group ON {table}({', '.join(group_by)});  -- GROUP BY optimizasyonu"
-            recommendations.append(rec)
-    
-    return list(set(recommendations))  # Tekilleri al
-
-def find_table_for_column(tables, column):
-    """Bir sütunun hangi tabloya ait olabileceğini tahmin eder."""
-    if not tables:
-        return None
-    # Basit yaklaşım: ilk tabloyu döndür
-    return tables[0]
-
-def print_analysis_report(results):
-    """Analiz sonuçlarını okunabilir şekilde yazdırır."""
-    for i, result in enumerate(results, 1):
-        print(f"\n=== Sorgu {i} Analizi ===")
-        print(f"\nSorgu:\n{result['query'][:200]}...")  # Sadece ilk 200 karakter
+        # Sorgu analizi ve index gereksinimlerini değerlendirelim
+        print(f"Analyzing Query: {query}")
         
-        print(f"\nTablolar: {', '.join(result['tables'])}")
-        print(f"JOIN Sütunları: {result['join_columns']}")
-        print(f"WHERE Sütunları: {', '.join(result['where_columns'])}")
-        print(f"ORDER BY Sütunları: {', '.join(result['order_by_columns'])}")
-        print(f"GROUP BY Sütunları: {', '.join(result['group_by_columns'])}")
+        # 1. ÇOKLU JOIN içeren sorgular
+        if len(analysis['joins']) > 1:
+            print("Multiple JOIN detected. Indexes may be needed on the join conditions.")
         
-        print("\nÖnerilen Indexler:")
-        for rec in result['index_recommendations']:
-            print(f"- {rec}")
+        # 2. BÜYÜK VERİ KÜMELERİNE ÇALIŞAN SORGULAR
+        if len(analysis['tables']) > 3:
+            print("Query involves multiple large tables. Indexing may improve performance.")
         
-        print("\n" + "="*80)
+        # 3. KARMASIK WHERE KOŞULLARI
+        if len(analysis['where_conditions']) > 2:
+            print("Complex WHERE conditions detected. Consider indexing involved columns.")
+        
+        # 4. ORDER BY veya GROUP BY kullanılan sorgular
+        if analysis['order_by_columns'] or analysis['group_by_columns']:
+            print("ORDER BY or GROUP BY used. Indexing relevant columns may help performance.")
+        
+        # 5. ALT SORGULAR
+        if analysis['subqueries']:
+            print("Subqueries detected. Ensure proper indexing for subquery performance.")
+        
+        print("-" * 50)
 
-def main():
-    print("SQL Sorgu Analiz ve Index Öneri Aracı")
-    file_path = input("SQL dosya yolu (varsayılan: output_raw_sql.txt): ") or "output_raw_sql.txt"
-    
-    try:
-        results = analyze_sql_file(file_path)
-        print_analysis_report(results)
-        print(f"\nToplam {len(results)} sorgu analiz edildi.")
-    except Exception as e:
-        print(f"Hata oluştu: {str(e)}")
-
-if __name__ == "__main__":
-    main()
+# Kullanım
+analyze_sql_queries('output_raw_sql.txt')
