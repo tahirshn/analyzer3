@@ -25,13 +25,8 @@ class SqlParser:
             self.join_columns.add(f"{table2}.{column2}")
         
         # WHERE koşulunda kullanılan kolonları çıkar
-        where_pattern = r"where\s+(.*?)\s*(group|order|having|limit|;|$)"
-        where_matches = re.findall(where_pattern, query, re.IGNORECASE)
-
-        if where_matches:
-            where_clause = where_matches[0][0]
-            where_columns = re.findall(r"\b\w+\.\w+\b", where_clause)
-            self.where_columns.update(where_columns)
+        where_columns = self.extract_where_columns(query)
+        self.where_columns.update(where_columns)
 
         # Tabloları tespit et
         self.tables_involved.update(self.get_tables(query))
@@ -40,6 +35,22 @@ class SqlParser:
         print("Tables involved:", self.tables_involved)
         print("JOIN columns:", self.join_columns)
         print("WHERE columns:", self.where_columns)
+
+    # WHERE koşulundaki kolonları çıkart
+    def extract_where_columns(self, query: str):
+        # WHERE bloğunu al
+        where_pattern = r"where\s+(.*?)(group|order|having|limit|;|$)"
+        match = re.search(where_pattern, query, re.IGNORECASE)
+
+        where_columns = set()
+
+        if match:
+            where_clause = match.group(1)
+
+            # Kolonları çıkar, hem AND hem de OR koşulları için geçerli
+            where_columns.update(re.findall(r"\b\w+\.\w+\b", where_clause))
+
+        return where_columns
 
     # SQL sorgusunda kullanılan tablolara bak
     def get_tables(self, query: str):
