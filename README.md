@@ -1,86 +1,78 @@
-import org.junit.jupiter.api.Test
-import org.springframework.boot.test.context.SpringBootTest
-import org.springframework.beans.factory.annotation.Autowired
-import jakarta.persistence.EntityManager
-import jakarta.persistence.metamodel.EntityType
-import java.io.File
-import java.nio.file.Files
-import java.nio.file.Paths
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import com.fasterxml.jackson.module.kotlin.writeValueAsString
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Dict
 
-@SpringBootTest
-class IndexLoggerJsonTest {
 
-    @Autowired
-    lateinit var entityManager: EntityManager
+@dataclass
+class ColumnInfo:
+    name: str
 
-    @Test
-    fun `log indexes as JSON to file`() {
-        val connection = entityManager.unwrap(java.sql.Connection::class.java)
-        val statement = connection.createStatement()
 
-        // Sadece projedeki entity'lere ait tablo adlarını al
-        val entityTableNames = entityManager.metamodel.entities
-            .mapNotNull { it.getTableName() }
-            .toSet()
+@dataclass
+class IndexInfo:
+    name: str
+    columns: List[ColumnInfo]
+    is_unique: bool
+    is_primary: bool
 
-        val query = """
-            SELECT 
-                t.relname AS table_name,
-                i.relname AS index_name,
-                a.attname AS column_name,
-                ix.indisunique AS is_unique,
-                ix.indisprimary AS is_primary
-            FROM 
-                pg_class t,
-                pg_class i,
-                pg_index ix,
-                pg_attribute a
-            WHERE 
-                t.oid = ix.indrelid
-                AND i.oid = ix.indexrelid
-                AND a.attrelid = t.oid
-                AND a.attnum = ANY(ix.indkey)
-                AND t.relkind = 'r'
-            ORDER BY
-                t.relname, i.relname
-        """.trimIndent()
 
-        val resultSet = statement.executeQuery(query)
+@dataclass
+class TableIndexInfo:
+    table_name: str
+    indexes: List[IndexInfo]
 
-        val resultList = mutableListOf<Map<String, Any>>()
 
-        while (resultSet.next()) {
-            val table = resultSet.getString("table_name")
-            if (table !in entityTableNames) continue
+def read_indexes_from_json(file_path: Path) -> List[TableIndexInfo]:
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
 
-            val row = mapOf(
-                "table" to table,
-                "index" to resultSet.getString("index_name"),
-                "column" to resultSet.getString("column_name"),
-                "isUnique" to resultSet.getBoolean("is_unique"),
-                "isPrimary" to resultSet.getBoolean("is_primary")
+    with file_path.open("r", encoding="utf-8") as f:
+        flat_data = json.load(f)
+
+    # Grup: table -> index -> IndexInfo
+    table_map: Dict[str, Dict[str, IndexInfo]] = {}
+
+    for row in flat_data:
+        table = row["table"]
+        index = row["index"]
+        column_name = row["column"]
+        is_unique = row["isUnique"]
+        is_primary = row["isPrimary"]
+
+        if table not in table_map:
+            table_map[table] = {}
+
+        if index not in table_map[table]:
+            table_map[table][index] = IndexInfo(
+                name=index,
+                columns=[],
+                is_unique=is_unique,
+                is_primary=is_primary
             )
-            resultList.add(row)
-        }
 
-        val mapper: ObjectMapper = jacksonObjectMapper()
-        val json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(resultList)
+        # Aynı kolonu tekrar eklememek için kontrol
+        if not any(c.name == column_name for c in table_map[table][index].columns):
+            table_map[table][index].columns.append(ColumnInfo(name=column_name))
 
-        val outputDir = Paths.get("build/sql_logs")
-        Files.createDirectories(outputDir)
+    # Sonuç listesini oluştur
+    result: List[TableIndexInfo] = [
+        TableIndexInfo(table_name=table, indexes=list(indexes.values()))
+        for table, indexes in table_map.items()
+    ]
 
-        val outputFile = outputDir.resolve("indexes.json").toFile()
-        outputFile.writeText(json)
+    return result
 
-        println("Indexes written to: ${outputFile.absolutePath}")
-    }
 
-    // Extension ile tablo adını al (annotation'dan)
-    private fun EntityType<*>.getTableName(): String? {
-        return this.javaType.getAnnotation(jakarta.persistence.Table::class.java)?.name
-            ?: this.name.lowercase() // Eğer @Table yoksa entity adı
-    }
-}
+def main():
+    json_path = Path("build/sql_logs/indexes.json")
+
+    try:
+        tables = read_indexes_from_json(json_path)
+        print(f"Loaded index metadata for {len(tables)} tables.")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+if __name__ == "__main__":
+    main()
