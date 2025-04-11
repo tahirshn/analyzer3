@@ -174,4 +174,5 @@ if __name__ == "__main__":
     parser.print_analysis_results()
     
     # Optionally save to JSON
-    with open("sql_
+    with open("sql_analysis.json", "w") as f:
+        json.dump(queries, f, indent=2)
