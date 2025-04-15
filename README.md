@@ -1,13 +1,8 @@
-import jakarta.persistence.Column
-import jakarta.persistence.EntityManager
-import jakarta.persistence.Id
-import jakarta.persistence.Table
+import jakarta.persistence.*
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.context.ApplicationContext
-import org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean
-import kotlin.reflect.full.findAnnotation
 import kotlin.reflect.jvm.kotlinProperty
 
 @SpringBootTest
@@ -25,7 +20,6 @@ class EntityMetadataExtractorSpringContextTest {
 
         for (entityType in metamodel.entities) {
             val javaType = entityType.javaType
-            val kotlinClass = javaType.kotlin
 
             println("Entity Class: ${javaType.simpleName}")
 
@@ -35,11 +29,17 @@ class EntityMetadataExtractorSpringContextTest {
                 ?: toKebabCase(javaType.simpleName)
             println("Table Name: $tableName")
 
-            // Fields
             for (field in javaType.declaredFields) {
+                field.isAccessible = true
+
                 val columnAnnotation = field.getAnnotation(Column::class.java)
-                val columnName = columnAnnotation?.name?.takeIf { it.isNotBlank() }
-                    ?: toKebabCase(field.name)
+                val joinColumnAnnotation = field.getAnnotation(JoinColumn::class.java)
+
+                val columnName = when {
+                    columnAnnotation?.name?.isNotBlank() == true -> columnAnnotation.name
+                    joinColumnAnnotation?.name?.isNotBlank() == true -> joinColumnAnnotation.name
+                    else -> toKebabCase(field.name)
+                }
 
                 val isId = field.isAnnotationPresent(Id::class.java)
 
