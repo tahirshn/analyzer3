@@ -1,109 +1,76 @@
-package com.sqlinspector.core.analyzer
+package com.sqlinspector.analyzer
 
-import jakarta.persistence.EntityManager
-import org.springframework.data.jpa.repository.Query
-import org.springframework.data.repository.CrudRepository
-import java.util.regex.Pattern
-import kotlin.reflect.KClass
+import com.sqlinspector.metadata.EntityMetadataExtractor
+import com.sqlinspector.metadata.QueryField
+import java.io.File
 
-class QueryFieldAnalyzer(private val entityManager: EntityManager) {
+class QueryFieldAnalyzer(
+    private val entityMetadataExtractor: EntityMetadataExtractor
+) {
 
-    data class QueryAnalysisResult(
-        val methodName: String,
-        val rawQuery: String?,
-        val extractedFields: Set<String>,
-        val tableName: String,
-        val issues: List<String>
-    )
+    fun analyzeQuery(sql: String): Set<QueryField> {
+        val cleanedSql = sql.replace("\n", " ").replace(Regex("\s+"), " ").trim()
+        val aliasToEntity = extractAliasToEntityMap(cleanedSql)
+        val whereClause = extractWhereClause(cleanedSql)
+        val aliasFieldPairs = extractAliasFields(whereClause)
 
-    fun analyzeRepository(repo: CrudRepository<*, *>): List<QueryAnalysisResult> {
-        val repoClass = repo.javaClass
-        val results = mutableListOf<QueryAnalysisResult>()
-
-        val entityClass = resolveEntityClass(repoClass) ?: return emptyList()
-        val tableName = resolveTableName(entityClass)
-        val entityFields = extractEntityFieldNames(entityClass)
-
-        for (method in repoClass.methods) {
-            val queryAnnotation = method.getAnnotation(Query::class.java)
-            val rawQuery = queryAnnotation?.value ?: continue
-
-            val isNative = queryAnnotation.nativeQuery
-            val resolvedQuery = if (isNative) rawQuery else replaceAliasesWithTableNames(rawQuery, entityClass.simpleName)
-
-            val fieldsInQuery = extractFieldsFromQuery(resolvedQuery)
-
-            val unknownFields = fieldsInQuery.filterNot { it in entityFields }.toList()
-            val issues = unknownFields.map { "Unknown field in query: $it" }
-
-            results.add(
-                QueryAnalysisResult(
-                    methodName = method.name,
-                    rawQuery = rawQuery,
-                    extractedFields = fieldsInQuery,
-                    tableName = tableName,
-                    issues = issues
-                )
-            )
-        }
-
-        return results
+        return aliasFieldPairs.mapNotNull { (alias, field) ->
+            val entityName = aliasToEntity[alias.lowercase()]
+            val entityMeta = entityMetadataExtractor.getEntityMetadata(entityName ?: return@mapNotNull null)
+            val columnMeta = entityMeta?.fields?.find { it.fieldName.equals(field, ignoreCase = true) }
+            if (columnMeta != null) QueryField(entityName, columnMeta.columnName) else null
+        }.toSet()
     }
 
-    private fun extractEntityFieldNames(entityClass: Class<*>): Set<String> {
-        return entityClass.declaredFields.map { it.name }.toSet()
-    }
-
-    private fun resolveEntityClass(repoClass: Class<*>): Class<*>? {
-        return repoClass.genericInterfaces
-            .flatMap { generic ->
-                (generic as? java.lang.reflect.ParameterizedType)?.actualTypeArguments?.toList().orEmpty()
-            }
-            .firstOrNull() as? Class<*>
-    }
-
-    private fun resolveTableName(entityClass: Class<*>): String {
-        val table = entityClass.getAnnotation(jakarta.persistence.Table::class.java)
-        return table?.name ?: entityClass.simpleName.toSnakeCase()
-    }
-
-    private fun extractFieldsFromQuery(query: String): Set<String> {
-        val fieldPattern = Pattern.compile("""\b(\w+)\.(\w+)\b""")
-        val matcher = fieldPattern.matcher(query)
-        val fields = mutableSetOf<String>()
-
-        while (matcher.find()) {
-            fields.add(matcher.group(2))
-        }
-
-        return fields
-    }
-
-    private fun replaceAliasesWithTableNames(query: String, entityName: String): String {
+    private fun extractAliasToEntityMap(sql: String): Map<String, String> {
         val aliasMap = mutableMapOf<String, String>()
-        val aliasPattern = Regex("""\b(from|join)\s+(\w+)\s+(\w+)""", RegexOption.IGNORE_CASE)
-        val replacedQuery = aliasPattern.replace(query) { match ->
-            val tableOrEntity = match.groupValues[2]
-            val alias = match.groupValues[3]
-            aliasMap[alias] = tableOrEntity
-            match.value
+        val regex = Regex("""(?:(from|join|left join|inner join)\s+)([\w.]+)\s+(\w+)""", RegexOption.IGNORE_CASE)
+        regex.findAll(sql).forEach {
+            val path = it.groupValues[2] // gcr.cashbackCriteria -> cashbackCriteria
+            val alias = it.groupValues[3] // alias
+            val entity = path.substringAfterLast(".")
+            aliasMap[alias.lowercase()] = entity
         }
-
-        var resultQuery = replacedQuery
-        aliasMap.forEach { (alias, actual) ->
-            val pattern = Regex("""\b$alias\.\b""")
-            resultQuery = resultQuery.replace(pattern, "$actual.")
-        }
-
-        // Eğer hiç alias yoksa, entity adını doğrudan kullan
-        if (aliasMap.isEmpty()) {
-            val defaultPattern = Regex("""\b\w+\.\b""")
-            resultQuery = defaultPattern.replace(resultQuery, "$entityName.")
-        }
-
-        return resultQuery
+        return aliasMap
     }
 
-    private fun String.toSnakeCase(): String =
-        this.replace(Regex("([a-z])([A-Z]+)"), "$1_$2").lowercase()
+    private fun extractWhereClause(sql: String): String {
+        val whereMatch = Regex("where (.+)", RegexOption.IGNORE_CASE).find(sql)
+        return whereMatch?.groupValues?.get(1) ?: ""
+    }
+
+    private fun extractAliasFields(whereClause: String): List<Pair<String, String>> {
+        val regex = Regex("""(\w+)\.(\w+)""")
+        return regex.findAll(whereClause)
+            .map { it.groupValues[1] to it.groupValues[2] }
+            .toList()
+    }
+}
+
+fun main() {
+    val entityExtractor = EntityMetadataExtractor(File("src/main/resources/entities")) // or wherever metadata is
+    val analyzer = QueryFieldAnalyzer(entityExtractor)
+
+    val sql = """
+        SELECT COUNT(gcr) > 0
+        FROM GlobalCashbackRule gcr
+        JOIN gcr.cashbackCriteria Cc
+        JOIN cc.cashbackCriterionvalues CCV
+        LEFT JOIN ccv.merchantCountryCriteria mcc
+        WHERE gcr.activeSince = (SELECT MAX(activeSince) FROM GlobalCashbackRule WHERE activeSince <= :transactionTime AND status IN ('OVERRIDDEN', 'APPROVED'))
+        AND cc.rule = 'EXCLUDE'
+        AND (
+            (cc.property = 'MERCHANT_ID' AND ccv.value = :merchantId)
+            OR (cc.property = 'MERCHANT_NAME' AND ccv.value = :merchantName)
+            OR (cc.property = 'MERCHANT_CATEGORY' AND ccv.value = :merchantCategory)
+        )
+        AND (
+            mcc IS NULL
+            OR :merchantCountryCode IS NULL
+            OR :merchantCountryCode = mcc.countryCode
+        )
+    """.trimIndent()
+
+    val fields = analyzer.analyzeQuery(sql)
+    fields.forEach { println("Detected field: \${it.table}.\${it.column}") }
 }
