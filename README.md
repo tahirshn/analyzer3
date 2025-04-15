@@ -1,4 +1,8 @@
-val resolvableType = org.springframework.core.ResolvableType.forClass(repoClass)
-    .`as`(CrudRepository::class.java)
+ val repoInterface = repo.javaClass.interfaces.firstOrNull {
+        CrudRepository::class.java.isAssignableFrom(it)
+    } ?: return@forEach
 
-val entityClass = resolvableType.generic(0).resolve() ?: return@forEac
+    val entityClass = (repoInterface.genericInterfaces.firstOrNull {
+        it is ParameterizedType
+    } as? ParameterizedType)?.actualTypeArguments?.getOrNull(0) as? Class<*>
+        ?: return@forEach
