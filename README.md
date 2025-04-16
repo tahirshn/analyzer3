@@ -1,175 +1,171 @@
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Dict, Optional
 
 @dataclass
-class WhereCondition:
-    """Represents a condition in a WHERE clause"""
-    table: Optional[str]
+class SqlParameter:
+    table: str
     column: str
-    operator: str
-    value: str
+    parameter_index: int
+    context: str  # WHERE/JOIN/INSERT etc.
 
-class SqlWhereAnalyzer:
+class SqlParameterAnalyzer:
     def __init__(self):
-        # Regex pattern to identify WHERE clauses and their conditions
-        self.where_pattern = re.compile(
-            r'WHERE\s+(.*?)(?=(?:\s+GROUP BY|\s+HAVING|\s+ORDER BY|\s+LIMIT|;|$))',
-            re.IGNORECASE | re.DOTALL
-        )
-        self.condition_pattern = re.compile(
-            r'(["\w.]+)\s*(=|!=|<>|<|>|<=|>=|LIKE|ILIKE|IN|NOT IN|BETWEEN|IS|IS NOT)\s*((?:\?.+?|["\w.]+(?:\([^)]*\))?)(?:\s+(?:AND|OR))?)',
-            re.IGNORECASE
-        )
+        self.parameters: List[SqlParameter] = []
+        self.current_param_index = 0
 
-    def analyze_sql_file(self, file_path: str) -> Dict[str, List[WhereCondition]]:
-        """Analyze a SQL file and extract WHERE conditions"""
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+    def analyze_sql(self, sql: str) -> List[SqlParameter]:
+        """Analyze SQL and extract parameterized values with context"""
+        self.parameters = []
+        self.current_param_index = 0
         
-        # Split into individual queries
-        queries = self._split_sql_queries(content)
-        results = {}
+        # Normalize SQL for easier parsing
+        normalized_sql = self._normalize_sql(sql)
         
-        for query in queries:
-            if not query.strip():
-                continue
+        # Extract parameters from different clauses
+        self._extract_where_parameters(normalized_sql)
+        self._extract_join_parameters(normalized_sql)
+        self._extract_insert_parameters(normalized_sql)
+        self._extract_update_parameters(normalized_sql)
+        
+        return self.parameters
+
+    def _normalize_sql(self, sql: str) -> str:
+        """Normalize SQL for consistent parsing"""
+        # Remove comments
+        sql = re.sub(r'--.*?$', '', sql, flags=re.MULTILINE)
+        sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+        
+        # Standardize whitespace
+        sql = ' '.join(sql.split())
+        
+        # Handle IN clauses with multiple parameters
+        sql = re.sub(r'\(\s*\?\s*(,\s*\?)+\s*\)', ' (?)', sql)
+        
+        return sql
+
+    def _extract_where_parameters(self, sql: str):
+        """Extract parameters from WHERE clause"""
+        where_match = re.search(r'WHERE\s+(.*?)(?=\s+(GROUP BY|HAVING|ORDER BY|LIMIT|$)', sql, re.IGNORECASE)
+        if where_match:
+            where_clause = where_match.group(1)
+            self._process_conditions(where_clause, 'WHERE')
+
+    def _extract_join_parameters(self, sql: str):
+        """Extract parameters from JOIN conditions"""
+        join_matches = re.finditer(r'JOIN\s+.*?\s+ON\s+(.*?)(?=\s+(WHERE|GROUP BY|HAVING|ORDER BY|LIMIT|JOIN|$))', 
+                                sql, re.IGNORECASE)
+        for match in join_matches:
+            join_conditions = match.group(1)
+            self._process_conditions(join_conditions, 'JOIN')
+
+    def _extract_insert_parameters(self, sql: str):
+        """Extract parameters from INSERT VALUES clause"""
+        insert_match = re.search(r'INSERT\s+INTO\s+(\w+)\s*\(.*?\)\s*VALUES\s*\(.*?\)', sql, re.IGNORECASE)
+        if insert_match:
+            table = insert_match.group(1)
+            values_match = re.search(r'VALUES\s*\((.*?)\)', sql, re.IGNORECASE)
+            if values_match:
+                values = values_match.group(1)
+                param_count = values.count('?')
+                for i in range(param_count):
+                    self.parameters.append(SqlParameter(
+                        table=table,
+                        column=f"column_{self.current_param_index + 1}",
+                        parameter_index=self.current_param_index,
+                        context='INSERT'
+                    ))
+                    self.current_param_index += 1
+
+    def _extract_update_parameters(self, sql: str):
+        """Extract parameters from UPDATE SET clause"""
+        update_match = re.search(r'UPDATE\s+(\w+)\s+SET\s+(.*?)(?=\s+WHERE|$)', sql, re.IGNORECASE)
+        if update_match:
+            table = update_match.group(1)
+            set_clause = update_match.group(2)
+            set_items = [item.strip() for item in set_clause.split(',')]
             
-            query_id = self._generate_query_id(query)
-            conditions = self._extract_where_conditions(query)
-            results[query_id] = conditions
-            
-        return results
+            for item in set_items:
+                if '?' in item:
+                    column_match = re.match(r'([\w\.]+)\s*=', item)
+                    if column_match:
+                        column = column_match.group(1).split('.')[-1]  # Remove table prefix if exists
+                        self.parameters.append(SqlParameter(
+                            table=table,
+                            column=column,
+                            parameter_index=self.current_param_index,
+                            context='UPDATE'
+                        ))
+                        self.current_param_index += 1
 
-    def _split_sql_queries(self, content: str) -> List[str]:
-        """Split SQL content into individual queries"""
-        # Split on semicolons that aren't inside strings or parentheses
-        return re.split(r';(?=(?:[^"\']|"[^"]*"|\'[^\']*\')*$)', content)
+    def _process_conditions(self, conditions: str, context: str):
+        """Process conditions and extract parameters"""
+        # Split conditions by AND/OR but handle nested parentheses
+        condition_parts = self._split_conditions(conditions)
+        
+        for part in condition_parts:
+            if '?' in part:
+                # Extract column name from condition
+                column_match = re.search(r'([\w\.]+)\s*[=<>!]+\s*\?', part)
+                if column_match:
+                    full_column = column_match.group(1)
+                    table, column = (full_column.split('.') + [None])[:2]
+                    if column is None:
+                        column = table
+                        table = None  # Table name not specified
+                    
+                    self.parameters.append(SqlParameter(
+                        table=table,
+                        column=column,
+                        parameter_index=self.current_param_index,
+                        context=context
+                    ))
+                    self.current_param_index += 1
 
-    def _generate_query_id(self, query: str) -> str:
-        """Generate a simple identifier for the query"""
-        return f"query_{abs(hash(query.strip()))}"
-
-    def _extract_where_conditions(self, query: str) -> List[WhereCondition]:
-        """Extract conditions from WHERE clause"""
-        where_match = self.where_pattern.search(query)
-        if not where_match:
-            return []
-        
-        where_clause = where_match.group(1)
-        conditions = []
-        
-        # Split conditions by AND/OR but preserve nested parentheses
-        condition_strings = self._split_conditions(where_clause)
-        
-        for cond_str in condition_strings:
-            cond = self._parse_condition(cond_str)
-            if cond:
-                conditions.append(cond)
-        
-        return conditions
-
-    def _split_conditions(self, where_clause: str) -> List[str]:
-        """Split WHERE clause into individual conditions"""
-        conditions = []
+    def _split_conditions(self, conditions: str) -> List[str]:
+        """Split conditions while handling nested parentheses"""
+        parts = []
         current = []
         paren_level = 0
         
-        tokens = re.findall(r'(\bAND\b|\bOR\b|\(|\)|[^()]+)', where_clause, re.IGNORECASE)
-        
-        for token in tokens:
-            token = token.strip()
-            if not token:
-                continue
-                
-            if token.upper() in ('AND', 'OR'):
-                if paren_level == 0 and current:
-                    conditions.append(' '.join(current))
-                    current = []
-                continue
-                
-            if token == '(':
+        for char in conditions:
+            if char == '(':
                 paren_level += 1
-            elif token == ')':
+            elif char == ')':
                 paren_level -= 1
-                
-            current.append(token)
+            
+            if char in (' ', '\t') and paren_level == 0:
+                if current:
+                    parts.append(''.join(current))
+                    current = []
+            else:
+                current.append(char)
         
         if current:
-            conditions.append(' '.join(current))
+            parts.append(''.join(current))
         
-        return conditions
+        # Further split by AND/OR at top level
+        final_parts = []
+        for part in parts:
+            if part.upper() in ('AND', 'OR'):
+                continue
+            final_parts.append(part)
+        
+        return final_parts
 
-    def _parse_condition(self, condition_str: str) -> Optional[WhereCondition]:
-        """Parse a single condition string"""
-        # Clean up the condition string
-        condition_str = condition_str.strip()
-        if not condition_str:
-            return None
-            
-        # Handle nested parentheses
-        if condition_str.startswith('(') and condition_str.endswith(')'):
-            condition_str = condition_str[1:-1].strip()
-            
-        # Match the condition pattern
-        match = self.condition_pattern.match(condition_str)
-        if not match:
-            return None
-            
-        left, operator, right = match.groups()
-        
-        # Parse table and column
-        table, column = self._parse_column_reference(left)
-        
-        # Clean up the right side value
-        right = right.split()[0]  # Take only the first part before AND/OR if present
-        right = right.strip('"\'')  # Remove string quotes
-        
-        return WhereCondition(
-            table=table,
-            column=column,
-            operator=operator.upper(),
-            value=right
-        )
-
-    def _parse_column_reference(self, reference: str) -> Tuple[Optional[str], str]:
-        """Parse a column reference into table and column parts"""
-        parts = reference.split('.')
-        if len(parts) == 2:
-            return parts[0], parts[1]
-        return None, reference
-
-def print_where_analysis(results: Dict[str, List[WhereCondition]]):
-    """Print the analysis results"""
-    for query_id, conditions in results.items():
-        print(f"\n=== Query: {query_id} ===")
-        
-        if not conditions:
-            print("No WHERE conditions found")
-            continue
-            
-        print("WHERE Conditions:")
-        for cond in conditions:
-            col_ref = f"{cond.table}.{cond.column}" if cond.table else cond.column
-            print(f"  {col_ref} {cond.operator} {cond.value}")
-
+# Example usage
 if __name__ == "__main__":
-    analyzer = SqlWhereAnalyzer()
+    analyzer = SqlParameterAnalyzer()
     
-    # Example SQL file with WHERE clauses
-    sample_sql = """
-    SELECT * FROM users WHERE id = 1 AND status = 'active';
-    UPDATE products SET price = 9.99 WHERE category = 'electronics' AND stock > 0;
-    DELETE FROM orders WHERE created_at < '2023-01-01' OR customer_id IS NULL;
-    SELECT * FROM accounts WHERE balance BETWEEN 100 AND 1000;
+    test_sql = """
+    SELECT * FROM users WHERE id = ? AND status = ?;
+    UPDATE products SET price = ? WHERE id = ?;
+    INSERT INTO orders (user_id, product_id) VALUES (?, ?);
+    SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id WHERE o.date > ?;
     """
     
-    # Write sample SQL to temporary file
-    with open("temp_queries.sql", "w", encoding='utf-8') as f:
-        f.write(sample_sql)
+    parameters = analyzer.analyze_sql(test_sql)
     
-    # Analyze the file
-    analysis_results = analyzer.analyze_sql_file("temp_queries.sql")
-    
-    # Print results
-    print_where_analysis(analysis_results)
+    print("Parameter Analysis:")
+    for param in parameters:
+        print(f"Param #{param.parameter_index}: {param.table or 'unknown'}.{param.column} ({param.context})")
