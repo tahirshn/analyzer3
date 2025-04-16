@@ -1,127 +1,36 @@
-package com.sqlinspector.analyzer
+package com.example.jpqltonative
 
-import net.sf.jsqlparser.parser.CCJSqlParserUtil
-import net.sf.jsqlparser.statement.select.*
-import net.sf.jsqlparser.statement.Statement
-import net.sf.jsqlparser.schema.Column
-import net.sf.jsqlparser.expression.*
-import net.sf.jsqlparser.util.TablesNamesFinder
-import net.sf.jsqlparser.util.deparser.ExpressionDeParser
+import jakarta.persistence.EntityManager
+import org.hibernate.engine.spi.SessionFactoryImplementor
+import org.hibernate.query.sqm.SqmInterpreter
+import org.hibernate.query.sqm.SqmTranslatorFactory
+import org.hibernate.query.sqm.tree.SqmStatement
+import org.hibernate.query.sqm.internal.SemanticQueryInterpreter
+import org.hibernate.query.spi.QueryEngine
+import org.hibernate.query.sql.internal.StandardSqmTranslatorFactory
+import org.springframework.stereotype.Component
 
-data class SqlAnalysisResult(
-    val whereColumns: Set<String>,
-    val joinColumns: Set<String>,
-    val allReferencedTables: Set<String>
-)
+@Component
+class JpqlToNativeConverter(
+    private val entityManager: EntityManager
+) {
+    fun convert(jpql: String): String {
+        val session = entityManager.unwrap(org.hibernate.Session::class.java)
+        val factory = session.sessionFactory as SessionFactoryImplementor
+        val queryEngine: QueryEngine = factory.queryEngine
 
-object SqlAnalyzer {
+        // Parse JPQL -> SQM (Semantic Query Model)
+        val sqmStatement: SqmStatement<*> = SemanticQueryInterpreter.parse(jpql, queryEngine, null)
 
-    fun analyzeRawQuery(query: String): SqlAnalysisResult {
-        val whereColumns = mutableSetOf<String>()
-        val joinColumns = mutableSetOf<String>()
-        val referencedTables = mutableSetOf<String>()
-
-        val statement: Statement = CCJSqlParserUtil.parse(query)
-        if (statement is Select) {
-            val selectBody = statement.selectBody
-            extractTables(statement, referencedTables)
-            visitSelect(selectBody, whereColumns, joinColumns)
-        }
-
-        return SqlAnalysisResult(
-            whereColumns = whereColumns,
-            joinColumns = joinColumns,
-            allReferencedTables = referencedTables
+        // Translate SQM -> SQL AST -> SQL String
+        val sqmTranslatorFactory: SqmTranslatorFactory = StandardSqmTranslatorFactory()
+        val translator = sqmTranslatorFactory.createSelectTranslator(
+            sqmStatement,
+            factory,
+            queryEngine.sqmFunctionRegistry
         )
-    }
 
-    private fun extractTables(statement: Statement, tables: MutableSet<String>) {
-        val finder = TablesNamesFinder()
-        val found = finder.getTableList(statement)
-        tables.addAll(found)
-    }
-
-    private fun visitSelect(
-        selectBody: SelectBody,
-        whereColumns: MutableSet<String>,
-        joinColumns: MutableSet<String>
-    ) {
-        when (selectBody) {
-            is PlainSelect -> {
-                extractWhereColumns(selectBody.where, whereColumns)
-                extractJoins(selectBody.joins, joinColumns)
-                extractSubselects(selectBody.fromItem, whereColumns, joinColumns)
-            }
-
-            is SetOperationList -> {
-                selectBody.selects.forEach {
-                    visitSelect(it, whereColumns, joinColumns)
-                }
-                selectBody.withItemsList?.forEach {
-                    visitWithItem(it, whereColumns, joinColumns)
-                }
-            }
-
-            is WithItem -> {
-                visitWithItem(selectBody, whereColumns, joinColumns)
-            }
-        }
-    }
-
-    private fun visitWithItem(
-        withItem: WithItem,
-        whereColumns: MutableSet<String>,
-        joinColumns: MutableSet<String>
-    ) {
-        withItem.selectBody?.let {
-            visitSelect(it, whereColumns, joinColumns)
-        }
-    }
-
-    private fun extractWhereColumns(
-        expression: Expression?,
-        columns: MutableSet<String>
-    ) {
-        expression?.accept(object : ExpressionDeParser() {
-            override fun visit(column: Column) {
-                columns.add(column.fullyQualifiedName)
-            }
-        })
-    }
-
-    private fun extractJoins(
-        joins: List<Join>?,
-        joinColumns: MutableSet<String>
-    ) {
-        joins?.forEach { join ->
-            join.onExpression?.accept(object : ExpressionDeParser() {
-                override fun visit(column: Column) {
-                    joinColumns.add(column.fullyQualifiedName)
-                }
-            })
-
-            extractSubselects(join.rightItem, joinColumns, joinColumns)
-        }
-    }
-
-    private fun extractSubselects(
-        fromItem: FromItem?,
-        whereColumns: MutableSet<String>,
-        joinColumns: MutableSet<String>
-    ) {
-        when (fromItem) {
-            is SubSelect -> {
-                visitSelect(fromItem.selectBody, whereColumns, joinColumns)
-            }
-            is LateralSubSelect -> {
-                visitSelect(fromItem.subSelect.selectBody, whereColumns, joinColumns)
-            }
-            is ValuesList -> {
-                // Skip
-            }
-            is TableFunction -> {
-                // Optional: handle function call arguments
-            }
-        }
+        val jdbcSelect = translator.translate()
+        return jdbcSelect.sqlString
     }
 }
