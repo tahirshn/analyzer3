@@ -1,36 +1,23 @@
-package com.example.jpqltonative
+# diff_sql_generator.py
 
-import jakarta.persistence.EntityManager
-import org.hibernate.engine.spi.SessionFactoryImplementor
-import org.hibernate.query.sqm.SqmInterpreter
-import org.hibernate.query.sqm.SqmTranslatorFactory
-import org.hibernate.query.sqm.tree.SqmStatement
-import org.hibernate.query.sqm.internal.SemanticQueryInterpreter
-import org.hibernate.query.spi.QueryEngine
-import org.hibernate.query.sql.internal.StandardSqmTranslatorFactory
-import org.springframework.stereotype.Component
+def load_queries(file_path):
+    with open(file_path, "r") as f:
+        return set(line.strip() for line in f if line.strip())
 
-@Component
-class JpqlToNativeConverter(
-    private val entityManager: EntityManager
-) {
-    fun convert(jpql: String): String {
-        val session = entityManager.unwrap(org.hibernate.Session::class.java)
-        val factory = session.sessionFactory as SessionFactoryImplementor
-        val queryEngine: QueryEngine = factory.queryEngine
+def write_diff(diff_queries, output_path):
+    with open(output_path, "w") as f:
+        for query in sorted(diff_queries):
+            f.write(query + "\n")
 
-        // Parse JPQL -> SQM (Semantic Query Model)
-        val sqmStatement: SqmStatement<*> = SemanticQueryInterpreter.parse(jpql, queryEngine, null)
+if __name__ == "__main__":
+    feature_path = "feature_branch.log"
+    master_path = "master_branch.log"
+    output_path = "diff_sql.log"
 
-        // Translate SQM -> SQL AST -> SQL String
-        val sqmTranslatorFactory: SqmTranslatorFactory = StandardSqmTranslatorFactory()
-        val translator = sqmTranslatorFactory.createSelectTranslator(
-            sqmStatement,
-            factory,
-            queryEngine.sqmFunctionRegistry
-        )
+    feature_queries = load_queries(feature_path)
+    master_queries = load_queries(master_path)
 
-        val jdbcSelect = translator.translate()
-        return jdbcSelect.sqlString
-    }
-}
+    diff = feature_queries - master_queries
+    write_diff(diff, output_path)
+
+    print(f"Farklı sorgular {output_path} dosyasına yazıldı.")
