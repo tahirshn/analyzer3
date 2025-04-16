@@ -2,40 +2,51 @@ import psycopg2
 from psycopg2 import sql
 from tabulate import tabulate
 
-def get_index_info(connection_params, schema_name):
+def get_indexes_from_user_tables(connection_params, schema_name='public'):
     """
-    PostgreSQL'de belirtilen şemadaki tüm tabloların indeks bilgilerini getirir
+    Kullanıcı tarafından oluşturulan tablolardaki indeksleri getirir
     
     Args:
         connection_params (dict): PostgreSQL bağlantı parametreleri
-        schema_name (str): İncelecek şema adı
+        schema_name (str): İncelecek şema adı (varsayılan: 'public')
     
     Returns:
         list: İndeks bilgilerini içeren sözlük listesi
     """
     query = """
+    WITH user_tables AS (
+        SELECT c.oid, c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'r'  -- Sadece tablolar
+        AND n.nspname = %s    -- Belirtilen şema
+        AND c.relname NOT LIKE 'pg_%'  -- Sistem tablolarını hariç tut
+        AND c.relname NOT LIKE 'sql_%' -- Sistem tablolarını hariç tut
+        AND c.relname NOT IN ('spatial_ref_sys', 'geometry_columns', 'geography_columns')  -- PostGIS tablolarını hariç tut
+    )
     SELECT
-        t.relname AS table_name,
+        ut.relname AS table_name,
         i.relname AS index_name,
-        a.attname AS column_name,
-        CASE WHEN indisprimary THEN TRUE ELSE FALSE END AS is_primary,
-        CASE WHEN indisunique THEN TRUE ELSE FALSE END AS is_unique
+        array_to_string(array_agg(a.attname), ', ') AS column_names,
+        CASE WHEN ix.indisprimary THEN TRUE ELSE FALSE END AS is_primary,
+        CASE WHEN ix.indisunique THEN TRUE ELSE FALSE END AS is_unique,
+        am.amname AS index_type,
+        pg_get_indexdef(i.oid) AS index_definition
     FROM
-        pg_class t,
-        pg_class i,
-        pg_index ix,
-        pg_attribute a,
-        pg_namespace n
-    WHERE
-        t.oid = ix.indrelid
-        AND i.oid = ix.indexrelid
-        AND n.oid = t.relnamespace
-        AND a.attrelid = t.oid
-        AND a.attnum = ANY(ix.indkey)
-        AND t.relkind = 'r'  -- Sadece tablolar
-        AND n.nspname = %s  -- Şema adı
+        pg_index ix
+        JOIN user_tables ut ON ut.oid = ix.indrelid
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN pg_attribute a ON a.attrelid = ut.oid AND a.attnum = ANY(ix.indkey)
+        JOIN pg_am am ON i.relam = am.oid
+    GROUP BY
+        ut.relname,
+        i.relname,
+        ix.indisprimary,
+        ix.indisunique,
+        am.amname,
+        i.oid
     ORDER BY
-        t.relname,
+        ut.relname,
         i.relname;
     """
     
@@ -76,14 +87,11 @@ if __name__ == "__main__":
         "port": "5432"
     }
     
-    # İncelemek istediğiniz şema adı
-    schema_name = "public"  # Veya başka bir şema adı
-    
     # İndeks bilgilerini al
-    indexes = get_index_info(connection_params, schema_name)
+    indexes = get_indexes_from_user_tables(connection_params)
     
     # Sonuçları tablo halinde göster
     if indexes:
         print(tabulate(indexes, headers="keys", tablefmt="grid"))
     else:
-        print("Belirtilen şemada indeks bulunamadı.")
+        print("Kullanıcı tablolarında indeks bulunamadı.")
