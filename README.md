@@ -1,38 +1,63 @@
+from pathlib import Path
+import argparse
 import re
 
-input_file = "your-log-file.log"
-output_file = "output.sql"
 
-with open(input_file, "r", encoding="utf-8") as f:
-    lines = f.readlines()
+def extract_sql_queries(input_path: Path) -> set[str]:
+    with input_path.open("r", encoding="utf-8") as f:
+        lines = f.readlines()
 
-sql_lines = set()
-collecting = False
-current_sql = []
+    sql_lines = set()
+    index = 0
+    total_lines = len(lines)
 
-for line in lines:
-    # org.hibernate.SQL ile başlayan satır, bir SQL bloğunun başlangıcı olabilir
-    if "org.hibernate.SQL" in line:
-        collecting = True
-        current_sql = []
-        continue
+    while index < total_lines:
+        line = lines[index]
 
-    if collecting:
-        # Köşeli parantez ile başlayan log metadata'sı ise, SQL tamamlandı
-        if re.match(r'^\s*\[.*\]\s*$', line.strip()):
-            if current_sql:
-                sql = " ".join(l.strip() for l in current_sql)
-                sql = re.sub(r'\s+', ' ', sql).strip()
-                if sql:  # Boş değilse ve tekrar değilse ekle
-                    sql_lines.add(sql)
-            collecting = False
+        if "org.hibernate.SQL" in line:
+            index += 1
+            parts = re.split("org.hibernate.SQL", line)[1]
+            raw_sql_split = re.split(r'[:\[]', parts)
+            if len(raw_sql_split) > 1 and raw_sql_split[1].strip():
+                sql_lines.add(raw_sql_split[1].strip())
+            else:
+                sql_parts = []
+                while index < total_lines:
+                    next_line = lines[index]
+                    if "[" in next_line:
+                        sql_parts.append(next_line.split("[")[0].strip())
+                        index += 1
+                        break
+                    else:
+                        sql_parts.append(next_line.strip())
+                        index += 1
+                joined_sql = ' '.join(sql_parts).strip()
+                if joined_sql:
+                    sql_lines.add(joined_sql)
         else:
-            current_sql.append(line)
+            index += 1
 
-# Dosyaya yaz
-with open(output_file, "w", encoding="utf-8") as f:
-    for sql in sorted(sql_lines):  # İstersen sıralamayı kaldırabilirim
-        f.write(sql + "\n")
+    return sql_lines
 
-print(f"✅ Found {len(sql_lines)} unique SQL queries.")
-print(f"📄 Output written to: {output_file}")
+
+def write_output(output_path: Path, sql_queries: set[str]) -> None:
+    with output_path.open("w", encoding="utf-8") as f:
+        for sql in sorted(sql_queries):
+            f.write(sql + "\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Extract unique SQL queries from Hibernate logs.")
+    parser.add_argument("input_file", type=Path, help="Path to input log file.")
+    parser.add_argument("output_file", type=Path, help="Path to output SQL file.")
+    args = parser.parse_args()
+
+    sql_queries = extract_sql_queries(args.input_file)
+    write_output(args.output_file, sql_queries)
+
+    print(f"✅ Found {len(sql_queries)} unique SQL queries.")
+    print(f"📄 Output written to: {args.output_file}")
+
+
+if __name__ == "__main__":
+    main()
