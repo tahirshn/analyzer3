@@ -1,23 +1,18 @@
-#!/bin/bash
-
-INPUT_FILE="file1"
-OUTPUT_FILE="file2"
-
 awk '
 BEGIN {
     collecting = 0
     buffer = ""
 }
-/^org.hibernate.SQL:/ {
+/^[[:space:]]*org.hibernate.SQL:/ {
     if (collecting && buffer != "") {
         print buffer
     }
     collecting = 1
     buffer = $0
+    sub(/^[[:space:]]*/, "", buffer)
     next
 }
 collecting && /^[[:space:]]+/ {
-    # Remove leading spaces and append with space
     sub(/^[[:space:]]+/, "", $0)
     buffer = buffer " " $0
     next
@@ -32,4 +27,4 @@ END {
         print buffer
     }
 }
-' "$INPUT_FILE" > "$OUTPUT_FILE"
+'
