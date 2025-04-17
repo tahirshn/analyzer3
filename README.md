@@ -3,169 +3,164 @@ from dataclasses import dataclass
 from typing import List, Dict, Optional
 
 @dataclass
-class SqlParameter:
-    table: str
-    column: str
-    parameter_index: int
-    context: str  # WHERE/JOIN/INSERT etc.
+class QueryAnalysis:
+    query: str
+    tables: List[str]
+    columns: List[str]
+    potential_issues: List[str]
+    execution_time: Optional[float] = None
 
-class SqlParameterAnalyzer:
+class SqlPerformanceAnalyzer:
     def __init__(self):
-        self.parameters: List[SqlParameter] = []
-        self.current_param_index = 0
+        self.performance_patterns = {
+            'no_index': r'WHERE\s+([\w\.]+)\s*[=<>!]',
+            'full_table_scan': r'WHERE\s+([\w\.]+)\s+IS NOT NULL',
+            'wildcard_select': r'SELECT\s+\*\s+FROM',
+            'multiple_joins': r'(JOIN\s+.*?){3,}',
+            'complex_subquery': r'\(SELECT\s+.*?\s+FROM\s+.*?\s+WHERE\s+.*?\)',
+            'like_with_wildcard': r'LIKE\s+[\'"]%[^\'"]+[\'"]',
+            'order_by_non_indexed': r'ORDER BY\s+([\w\.]+)(?:\s+DESC)?\s*$',
+            'large_offset': r'OFFSET\s+\d{4,}',
+            'cross_join': r'CROSS JOIN',
+            'or_conditions': r'WHERE\s+.*?\sOR\s+.*?',
+        }
 
-    def analyze_sql(self, sql: str) -> List[SqlParameter]:
-        """Analyze SQL and extract parameterized values with context"""
-        self.parameters = []
-        self.current_param_index = 0
+    def analyze_sql_file(self, file_path: str) -> Dict[str, QueryAnalysis]:
+        """Analyze SQL file for potential performance issues"""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
         
-        # Normalize SQL for easier parsing
-        normalized_sql = self._normalize_sql(sql)
+        queries = self._split_sql_queries(content)
+        results = {}
         
-        # Extract parameters from different clauses
-        self._extract_where_parameters(normalized_sql)
-        self._extract_join_parameters(normalized_sql)
-        self._extract_insert_parameters(normalized_sql)
-        self._extract_update_parameters(normalized_sql)
-        
-        return self.parameters
+        for query in queries:
+            if not query.strip():
+                continue
+            
+            analysis = self._analyze_query(query)
+            if analysis.potential_issues:
+                results[hash(query)] = analysis
+                
+        return results
 
-    def _normalize_sql(self, sql: str) -> str:
-        """Normalize SQL for consistent parsing"""
+    def _split_sql_queries(self, content: str) -> List[str]:
+        """Split SQL content into individual queries"""
+        # Split on semicolons that aren't inside strings or parentheses
+        return re.split(r';(?=(?:[^\'"]*[\'"][^\'"]*[\'"])*[^\'"]*$)', content)
+
+    def _analyze_query(self, query: str) -> QueryAnalysis:
+        """Analyze a single SQL query for performance issues"""
+        normalized_query = self._normalize_query(query)
+        tables = self._extract_tables(normalized_query)
+        columns = self._extract_columns(normalized_query)
+        
+        analysis = QueryAnalysis(
+            query=query,
+            tables=tables,
+            columns=columns,
+            potential_issues=[]
+        )
+        
+        self._detect_performance_issues(normalized_query, analysis)
+        return analysis
+
+    def _normalize_query(self, query: str) -> str:
+        """Normalize SQL query for analysis"""
         # Remove comments
-        sql = re.sub(r'--.*?$', '', sql, flags=re.MULTILINE)
-        sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+        query = re.sub(r'--.*?$', '', query, flags=re.MULTILINE)
+        query = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL)
         
         # Standardize whitespace
-        sql = ' '.join(sql.split())
+        query = ' '.join(query.split())
+        query = query.upper()
         
-        # Handle IN clauses with multiple parameters
-        sql = re.sub(r'\(\s*\?\s*(,\s*\?)+\s*\)', ' (?)', sql)
-        
-        return sql
+        return query
 
-    def _extract_where_parameters(self, sql: str):
-        """Extract parameters from WHERE clause"""
-        where_match = re.search(r'WHERE\s+(.*?)(?=\s+(GROUP BY|HAVING|ORDER BY|LIMIT|$)', sql, re.IGNORECASE)
-        if where_match:
-            where_clause = where_match.group(1)
-            self._process_conditions(where_clause, 'WHERE')
-
-    def _extract_join_parameters(self, sql: str):
-        """Extract parameters from JOIN conditions"""
-        join_matches = re.finditer(r'JOIN\s+.*?\s+ON\s+(.*?)(?=\s+(WHERE|GROUP BY|HAVING|ORDER BY|LIMIT|JOIN|$))', 
-                                sql, re.IGNORECASE)
-        for match in join_matches:
-            join_conditions = match.group(1)
-            self._process_conditions(join_conditions, 'JOIN')
-
-    def _extract_insert_parameters(self, sql: str):
-        """Extract parameters from INSERT VALUES clause"""
-        insert_match = re.search(r'INSERT\s+INTO\s+(\w+)\s*\(.*?\)\s*VALUES\s*\(.*?\)', sql, re.IGNORECASE)
-        if insert_match:
-            table = insert_match.group(1)
-            values_match = re.search(r'VALUES\s*\((.*?)\)', sql, re.IGNORECASE)
-            if values_match:
-                values = values_match.group(1)
-                param_count = values.count('?')
-                for i in range(param_count):
-                    self.parameters.append(SqlParameter(
-                        table=table,
-                        column=f"column_{self.current_param_index + 1}",
-                        parameter_index=self.current_param_index,
-                        context='INSERT'
-                    ))
-                    self.current_param_index += 1
-
-    def _extract_update_parameters(self, sql: str):
-        """Extract parameters from UPDATE SET clause"""
-        update_match = re.search(r'UPDATE\s+(\w+)\s+SET\s+(.*?)(?=\s+WHERE|$)', sql, re.IGNORECASE)
-        if update_match:
-            table = update_match.group(1)
-            set_clause = update_match.group(2)
-            set_items = [item.strip() for item in set_clause.split(',')]
-            
-            for item in set_items:
-                if '?' in item:
-                    column_match = re.match(r'([\w\.]+)\s*=', item)
-                    if column_match:
-                        column = column_match.group(1).split('.')[-1]  # Remove table prefix if exists
-                        self.parameters.append(SqlParameter(
-                            table=table,
-                            column=column,
-                            parameter_index=self.current_param_index,
-                            context='UPDATE'
-                        ))
-                        self.current_param_index += 1
-
-    def _process_conditions(self, conditions: str, context: str):
-        """Process conditions and extract parameters"""
-        # Split conditions by AND/OR but handle nested parentheses
-        condition_parts = self._split_conditions(conditions)
+    def _extract_tables(self, query: str) -> List[str]:
+        """Extract table names from SQL query"""
+        # FROM clause tables
+        from_tables = re.findall(r'FROM\s+([\w]+)(?:\s+AS\s+[\w]+)?', query)
         
-        for part in condition_parts:
-            if '?' in part:
-                # Extract column name from condition
-                column_match = re.search(r'([\w\.]+)\s*[=<>!]+\s*\?', part)
-                if column_match:
-                    full_column = column_match.group(1)
-                    table, column = (full_column.split('.') + [None])[:2]
-                    if column is None:
-                        column = table
-                        table = None  # Table name not specified
-                    
-                    self.parameters.append(SqlParameter(
-                        table=table,
-                        column=column,
-                        parameter_index=self.current_param_index,
-                        context=context
-                    ))
-                    self.current_param_index += 1
+        # JOIN clause tables
+        join_tables = re.findall(r'JOIN\s+([\w]+)(?:\s+AS\s+[\w]+)?', query)
+        
+        # INSERT/UPDATE tables
+        dml_tables = re.findall(r'(?:INSERT\s+INTO|UPDATE)\s+([\w]+)', query)
+        
+        # Combine and deduplicate
+        tables = list(set(from_tables + join_tables + dml_tables))
+        return [t for t in tables if t]
 
-    def _split_conditions(self, conditions: str) -> List[str]:
-        """Split conditions while handling nested parentheses"""
-        parts = []
-        current = []
-        paren_level = 0
+    def _extract_columns(self, query: str) -> List[str]:
+        """Extract column names from SQL query"""
+        # WHERE clause columns
+        where_columns = re.findall(r'WHERE\s+([\w\.]+)\s*[=<>!]', query)
         
-        for char in conditions:
-            if char == '(':
-                paren_level += 1
-            elif char == ')':
-                paren_level -= 1
-            
-            if char in (' ', '\t') and paren_level == 0:
-                if current:
-                    parts.append(''.join(current))
-                    current = []
-            else:
-                current.append(char)
+        # SELECT columns (excluding *)
+        select_columns = re.findall(r'SELECT\s+([\w\.]+)(?:\s*,\s*([\w\.]+))*', query)
+        select_columns = [col for group in select_columns for col in group if col]
         
-        if current:
-            parts.append(''.join(current))
+        # JOIN conditions
+        join_columns = re.findall(r'ON\s+([\w\.]+)\s*=\s*[\w\.]+', query)
         
-        # Further split by AND/OR at top level
-        final_parts = []
-        for part in parts:
-            if part.upper() in ('AND', 'OR'):
-                continue
-            final_parts.append(part)
+        # Combine and deduplicate
+        columns = list(set(where_columns + select_columns + join_columns))
+        return [col.split('.')[-1] for col in columns if col]
+
+    def _detect_performance_issues(self, query: str, analysis: QueryAnalysis):
+        """Detect potential performance issues in the query"""
+        for issue_type, pattern in self.performance_patterns.items():
+            matches = re.findall(pattern, query)
+            if matches:
+                if issue_type == 'no_index':
+                    columns = [m.split('.')[-1] if '.' in m else m for m in matches]
+                    analysis.potential_issues.append(
+                        f"Potential missing index on columns: {', '.join(columns)}"
+                    )
+                elif issue_type == 'full_table_scan':
+                    columns = [m.split('.')[-1] if '.' in m else m for m in matches]
+                    analysis.potential_issues.append(
+                        f"Full table scan possible on: {', '.join(columns)}"
+                    )
+                elif issue_type == 'wildcard_select':
+                    analysis.potential_issues.append("SELECT * - fetching all columns")
+                elif issue_type == 'multiple_joins':
+                    analysis.potential_issues.append(f"Multiple joins ({len(matches)} tables)")
+                elif issue_type == 'complex_subquery':
+                    analysis.potential_issues.append("Complex subquery detected")
+                elif issue_type == 'like_with_wildcard':
+                    analysis.potential_issues.append("LIKE with leading wildcard (%)")
+                elif issue_type == 'order_by_non_indexed':
+                    columns = [m.split('.')[-1] if '.' in m else m for m in matches]
+                    analysis.potential_issues.append(
+                        f"ORDER BY non-indexed column: {', '.join(columns)}"
+                    )
+                elif issue_type == 'large_offset':
+                    analysis.potential_issues.append("Large OFFSET value (pagination issue)")
+                elif issue_type == 'cross_join':
+                    analysis.potential_issues.append("CROSS JOIN (cartesian product)")
+                elif issue_type == 'or_conditions':
+                    analysis.potential_issues.append("OR conditions preventing index usage")
+
+    def generate_report(self, analysis_results: Dict[str, QueryAnalysis]):
+        """Generate a performance analysis report"""
+        print("SQL Performance Analysis Report\n")
+        print("="*80)
         
-        return final_parts
+        for query_hash, analysis in analysis_results.items():
+            print(f"\nQuery (abbreviated): {analysis.query[:100]}...")
+            print(f"\nTables: {', '.join(analysis.tables)}")
+            print(f"Columns: {', '.join(analysis.columns)}")
+            print("\nPotential Performance Issues:")
+            for issue in analysis.potential_issues:
+                print(f"- {issue}")
+            print("\n" + "-"*80)
 
 # Example usage
 if __name__ == "__main__":
-    analyzer = SqlParameterAnalyzer()
+    analyzer = SqlPerformanceAnalyzer()
     
-    test_sql = """
-    SELECT * FROM users WHERE id = ? AND status = ?;
-    UPDATE products SET price = ? WHERE id = ?;
-    INSERT INTO orders (user_id, product_id) VALUES (?, ?);
-    SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id WHERE o.date > ?;
-    """
+    # Replace with your SQL file path
+    analysis_results = analyzer.analyze_sql_file("sql_queries.sql")
     
-    parameters = analyzer.analyze_sql(test_sql)
-    
-    print("Parameter Analysis:")
-    for param in parameters:
-        print(f"Param #{param.parameter_index}: {param.table or 'unknown'}.{param.column} ({param.context})")
+    analyzer.generate_report(analysis_results)
