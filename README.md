@@ -1,36 +1,34 @@
-#!/bin/bash
+import re
 
-INPUT_FILE="your-log-file.log"
-OUTPUT_FILE="output.sql"
+input_file = "your-log-file.log"
+output_file = "output.sql"
 
-> "$OUTPUT_FILE"  # output dosyasını sıfırla
+with open(input_file, "r", encoding="utf-8") as f:
+    lines = f.readlines()
 
-# Çok satırlı SQL'leri toplayıp tek satır haline getiren awk script
-awk '
-BEGIN { collecting = 0; sql_line = "" }
+sql_lines = []
+collecting = False
+current_sql = []
 
-# SQL log başlangıcı
-/^\S+ \S+ +DEBUG +[0-9]+ ---.*org\.hibernate\.SQL/ {
-    collecting = 1;
-    sql_line = "";
-    next;
-}
+for line in lines:
+    if "org.hibernate.SQL" in line:
+        collecting = True
+        current_sql = []
+        continue
 
-collecting {
-    # Metadata gibi köşeli parantezle başlayan satır -> SQL bitti
-    if ($0 ~ /^\s*\[.*\]$/) {
-        # tüm whitespace karakterlerini tek boşluğa indir
-        gsub(/[\r\n]/, " ", sql_line);
-        gsub(/[ \t]+/, " ", sql_line);
-        gsub(/^ +| +$/, "", sql_line);
-        print sql_line >> "'"$OUTPUT_FILE"'";
-        collecting = 0;
-        next;
-    }
+    # Bitiş koşulu: metadata satırı (köşeli parantezle başlayan satır)
+    if collecting:
+        if re.match(r'^\s*\[.*\]$', line):
+            sql = " ".join(l.strip() for l in current_sql)
+            sql = re.sub(r'\s+', ' ', sql).strip()
+            sql_lines.append(sql)
+            collecting = False
+        else:
+            current_sql.append(line)
 
-    # SQL satırlarını topluyoruz
-    sql_line = sql_line " " $0;
-}
-' "$INPUT_FILE"
+# Dosyaya yaz
+with open(output_file, "w", encoding="utf-8") as f:
+    for sql in sql_lines:
+        f.write(sql + "\n")
 
-echo "Extracted SQLs written to: $OUTPUT_FILE"
+print(f"✅ Extracted {len(sql_lines)} SQL statements to {output_file}")
