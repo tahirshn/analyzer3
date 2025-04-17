@@ -3,30 +3,34 @@
 INPUT_FILE="your-log-file.log"
 OUTPUT_FILE="output.sql"
 
-# output dosyasını sıfırla
-> "$OUTPUT_FILE"
+> "$OUTPUT_FILE"  # output dosyasını sıfırla
 
-# çok satırlı sorguları birleştirip tek satıra al
+# Çok satırlı SQL'leri toplayıp tek satır haline getiren awk script
 awk '
 BEGIN { collecting = 0; sql_line = "" }
-/org\.hibernate\.SQL/ {
+
+# SQL log başlangıcı
+/^\S+ \S+ +DEBUG +[0-9]+ ---.*org\.hibernate\.SQL/ {
     collecting = 1;
-    sql_line = "";  # yeni SQL için sıfırla
+    sql_line = "";
     next;
 }
+
 collecting {
-    # Metadata kısmına (köşeli parantezle başlayan satır) geldiğimizde bitir
+    # Metadata gibi köşeli parantezle başlayan satır -> SQL bitti
     if ($0 ~ /^\s*\[.*\]$/) {
-        gsub(/\r/, "", sql_line);   # Windows tarzı satır sonlarını temizle
-        gsub(/\n/, " ", sql_line);  # yeni satırları boşlukla değiştir
-        gsub(/\s+/, " ", sql_line); # fazla boşlukları temizle
+        # tüm whitespace karakterlerini tek boşluğa indir
+        gsub(/[\r\n]/, " ", sql_line);
+        gsub(/[ \t]+/, " ", sql_line);
+        gsub(/^ +| +$/, "", sql_line);
         print sql_line >> "'"$OUTPUT_FILE"'";
         collecting = 0;
         next;
     }
-    # sorgu satırını ekle
+
+    # SQL satırlarını topluyoruz
     sql_line = sql_line " " $0;
 }
 ' "$INPUT_FILE"
 
-echo "SQL sorguları '$OUTPUT_FILE' dosyasına yazıldı."
+echo "Extracted SQLs written to: $OUTPUT_FILE"
