@@ -1,7 +1,10 @@
-awk '/org.hibernate.SQL/ { 
-    # Sadece sorgu kısmını al
+awk '
+/org.hibernate.SQL/ {
+    # SQL sorgusunun olduğu kısmı çıkart
     if ($0 ~ /select|insert|update|delete/) {
-        gsub(/^[^:]+: */, "");  # Satırın başındaki log kısmını temizle
-        gsub(/\[.*\]$/, "");     # Sonundaki parametre kısmını temizle
-        print $0                # Sadece SQL sorgusunu yazdır
+        match($0, /: (.*) \[/, arr)  # Sorgu kısmını al
+        print arr[1]                  # Yalnızca SQL sorgusunu yazdır
     }
+}' "$input_file" > "$output_file"
+
+echo "SQL queries extracted and saved to $output_file"
