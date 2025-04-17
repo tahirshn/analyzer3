@@ -1,65 +1,32 @@
 #!/bin/bash
 
-# Çıktı dosyasını tanımla
-OUTPUT_FILE="extracted_sql_$(date +'%Y%m%d_%H%M%S').log"
+INPUT_FILE="your-log-file.log"
+OUTPUT_FILE="output.sql"
 
-echo "Spring Boot test loglarından SQL sorguları çıkarılıyor..."
-echo "Çıktı dosyası: $OUTPUT_FILE"
-echo "Çıkmak için CTRL+C tuşlarına basın..."
+# output dosyasını sıfırla
+> "$OUTPUT_FILE"
 
-# Temiz çıkış fonksiyonu
-cleanup() {
-  echo -e "\nSQL sorguları $OUTPUT_FILE dosyasına kaydedildi."
-  exit 0
+# çok satırlı sorguları birleştirip tek satıra al
+awk '
+BEGIN { collecting = 0; sql_line = "" }
+/org\.hibernate\.SQL/ {
+    collecting = 1;
+    sql_line = "";  # yeni SQL için sıfırla
+    next;
 }
-trap cleanup SIGINT
-
-# Logları işleme fonksiyonu
-process_logs() {
-  awk '
-  BEGIN { buffer = ""; sql_found = 0 }
-  
-  # SQL log satırını tespit et
-  /^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}.*org\.hibernate\.SQL/ {
-    if (buffer != "") {
-      print buffer >> "'"$OUTPUT_FILE"'"
+collecting {
+    # Metadata kısmına (köşeli parantezle başlayan satır) geldiğimizde bitir
+    if ($0 ~ /^\s*\[.*\]$/) {
+        gsub(/\r/, "", sql_line);   # Windows tarzı satır sonlarını temizle
+        gsub(/\n/, " ", sql_line);  # yeni satırları boşlukla değiştir
+        gsub(/\s+/, " ", sql_line); # fazla boşlukları temizle
+        print sql_line >> "'"$OUTPUT_FILE"'";
+        collecting = 0;
+        next;
     }
-    buffer = $0
-    sql_found = 1
-    next
-  }
-  
-  # SQL devam satırları (girintili)
-  sql_found && /^[[:space:]]+/ {
-    sub(/^[[:space:]]+/, "")
-    buffer = buffer " " $0
-    next
-  }
-  
-  # SQL olmayan satırlar
-  {
-    if (sql_found && buffer != "") {
-      print buffer >> "'"$OUTPUT_FILE"'"
-      buffer = ""
-      sql_found = 0
-    }
-  }
-  
-  END {
-    if (sql_found && buffer != "") {
-      print buffer >> "'"$OUTPUT_FILE"'"
-    }
-  }
-  '
+    # sorgu satırını ekle
+    sql_line = sql_line " " $0;
 }
+' "$INPUT_FILE"
 
-# Ana işlem
-if [ "$1" == "-f" ] && [ -f "$2" ]; then
-  # Dosyadan oku
-  cat "$2" | process_logs
-else
-  # Canlı logları dinle
-  mvn test | process_logs
-fi
-
-cleanup
+echo "SQL sorguları '$OUTPUT_FILE' dosyasına yazıldı."
