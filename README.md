@@ -1,137 +1,93 @@
-#!/bin/bash
+import os
+import re
 
-# Start timing
-START_TIME=$(date +%s)
+# Regex patterns
+create_index_pattern = re.compile(r'CREATE\s+(UNIQUE\s+)?INDEX\s+([^\s]+)\s+ON\s+([^\s(]+)\s*\(([^)]+)\)', re.IGNORECASE)
+drop_index_pattern = re.compile(r'DROP\s+INDEX\s+(IF\s+EXISTS\s+)?([^\s;]+)', re.IGNORECASE)
+pk_inline_pattern = re.compile(r'PRIMARY\s+KEY\s*\(([^)]+)\)', re.IGNORECASE)
+alter_add_pk_pattern = re.compile(r'ALTER\s+TABLE\s+([^\s]+)\s+ADD\s+CONSTRAINT\s+([^\s]+)\s+PRIMARY\s+KEY\s*\(([^)]+)\)', re.IGNORECASE)
+alter_drop_constraint_pattern = re.compile(r'ALTER\s+TABLE\s+([^\s]+)\s+DROP\s+CONSTRAINT\s+([^\s;]+)', re.IGNORECASE)
 
-# Color codes
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-BLUE='\033[1;34m'
-NC='\033[0m' # No Color
+def normalize_sql(sql: str) -> str:
+    """Cleans up SQL by removing line breaks and extra spaces."""
+    return re.sub(r'\s+', ' ', sql).strip()
 
-# Exit immediately if any command fails
-set -e
-set -o pipefail
+def analyze_indexes_and_primary_keys(sql_directory: str):
+    indexes = {}
 
-# Determine branches and paths
-FEATURE_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-MASTER_BRANCH="master"
-ORIGINAL_BRANCH="$FEATURE_BRANCH"
-PROJECT_DIR="$(git rev-parse --show-toplevel)"
+    for root, _, files in os.walk(sql_directory):
+        for file in sorted(files):
+            if file.endswith(".sql"):
+                full_path = os.path.join(root, file)
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    sql_content = f.read()
+                    statements = sql_content.split(";")
 
-# Script and config paths
-SQL_BEAUTIFIER="$PROJECT_DIR/script/sql_index_checker/extract_sql_beautifier.py"
-SQL_DIFF="$PROJECT_DIR/script/sql_index_checker/diff_sql_generator.py"
-TEST_CONFIG_FILE="$PROJECT_DIR/card-service-app/src/test/resources/application-test.properties"
-CONFIG_FILE="$PROJECT_DIR/card-service-app/src/test/resources/application.properties"
+                    for statement in statements:
+                        statement_clean = normalize_sql(statement)
 
-# Output files
-FEATURE_SQL="$PROJECT_DIR/feature_sql.log"
-MASTER_SQL="$PROJECT_DIR/master_sql.log"
-SQL_DIFF_FILE="$PROJECT_DIR/diff_sql.log"
+                        # CREATE INDEX
+                        create_match = create_index_pattern.search(statement_clean)
+                        if create_match:
+                            is_unique = bool(create_match.group(1))
+                            index_name = create_match.group(2)
+                            table_name = create_match.group(3)
+                            columns = create_match.group(4).replace(" ", "")
+                            indexes[index_name] = {
+                                'index_name': index_name,
+                                'table': table_name,
+                                'columns': columns,
+                                'type': 'UNIQUE INDEX' if is_unique else 'INDEX',
+                                'created_in': file,
+                                'dropped_in': None,
+                            }
 
-GRADLE_COMMAND="./gradlew test --info"
+                        # PRIMARY KEY inline
+                        pk_inline = pk_inline_pattern.search(statement_clean)
+                        if pk_inline and "ALTER TABLE" not in statement_clean:
+                            columns = pk_inline.group(1).replace(" ", "")
+                            index_name = f"{file}_inline_pk_{statements.index(statement)+1}"
+                            indexes[index_name] = {
+                                'index_name': index_name,
+                                'table': '?',
+                                'columns': columns,
+                                'type': 'PRIMARY KEY',
+                                'created_in': file,
+                                'dropped_in': None,
+                            }
 
-# Ensure we're not on master branch
-if [[ "$FEATURE_BRANCH" == "$MASTER_BRANCH" ]]; then
-  echo -e "${RED}⛔ This script should be executed from a feature branch.${NC}"
-  exit 1
-fi
+                        # ALTER TABLE ADD CONSTRAINT ... PRIMARY KEY
+                        alter_add_pk = alter_add_pk_pattern.search(statement_clean)
+                        if alter_add_pk:
+                            table_name = alter_add_pk.group(1)
+                            constraint_name = alter_add_pk.group(2)
+                            columns = alter_add_pk.group(3).replace(" ", "")
+                            indexes[constraint_name] = {
+                                'index_name': constraint_name,
+                                'table': table_name,
+                                'columns': columns,
+                                'type': 'PRIMARY KEY',
+                                'created_in': file,
+                                'dropped_in': None,
+                            }
 
-# Function to collect SQL logs
-collect_sql_log() {
-  local branch=$1
-  local out_log=$2
+                        # DROP INDEX
+                        drop_match = drop_index_pattern.search(statement_clean)
+                        if drop_match:
+                            index_name = drop_match.group(2)
+                            if index_name in indexes:
+                                indexes[index_name]['dropped_in'] = file
 
-  echo -e "${BLUE}ℹ Checking out branch: $branch${NC}"
-  git checkout "$branch"
+                        # ALTER TABLE DROP CONSTRAINT
+                        drop_constraint = alter_drop_constraint_pattern.search(statement_clean)
+                        if drop_constraint:
+                            constraint_name = drop_constraint.group(2)
+                            if constraint_name in indexes:
+                                indexes[constraint_name]['dropped_in'] = file
 
-  echo -e "${BLUE}ℹ Enabling SQL logging...${NC}"
-  cp "$CONFIG_FILE" "$TEST_CONFIG_FILE"
-  cat << 'EOL' >> "$CONFIG_FILE"
-# Hibernate SQL Logging (temporary for log extraction)
-logging.level.ROOT=ERROR
-logging.level.org.hibernate.SQL=DEBUG
-logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{36} - %msg%n
-EOL
-
-  echo -e "${BLUE}ℹ Running tests to collect SQL logs...${NC}"
-  $GRADLE_COMMAND | tee "$out_log"
-
-  echo -e "${BLUE}ℹ Formatting SQL with Python formatter...${NC}"
-  python3 "$SQL_BEAUTIFIER" "$out_log" "${out_log}.tmp"
-  mv "${out_log}.tmp" "$out_log"
-
-  echo -e "${GREEN}✔ SQL log written: $out_log${NC}"
-
-  echo -e "${BLUE}ℹ Restoring application.properties...${NC}"
-  cp "$TEST_CONFIG_FILE" "$CONFIG_FILE"
-  rm -f "$TEST_CONFIG_FILE"
-}
-
-# Main execution
-collect_sql_log "$ORIGINAL_BRANCH" "$FEATURE_SQL"
-collect_sql_log "$MASTER_BRANCH" "$MASTER_SQL"
-
-echo -e "${BLUE}ℹ Generating SQL diff...${NC}"
-python3 "$SQL_DIFF" "$FEATURE_SQL" "$MASTER_SQL" "$SQL_DIFF_FILE"
-echo -e "${GREEN}✔ SQL diff created at: $SQL_DIFF_FILE${NC}"
-
-git checkout "$ORIGINAL_BRANCH"
-echo -e "${GREEN}✔ Switched back to: $ORIGINAL_BRANCH${NC}"
-
-# Show total runtime
-END_TIME=$(date +%s)
-DURATION=$((END_TIME - START_TIME))
-echo -e "${GREEN}✔ Script completed in $DURATION seconds.${NC}"
-
-
-
--------------------------dockerfile-----------------------------
-FROM python:3.10-slim
-
-# Install Java and Gradle
-RUN apt-get update && \
-    apt-get install -y openjdk-17-jdk curl unzip git && \
-    curl -s "https://get.sdkman.io" | bash && \
-    bash -c "source $HOME/.sdkman/bin/sdkman-init.sh && sdk install gradle 8.5"
-
-# Set workdir
-WORKDIR /app
-
-# Copy project files
-COPY . /app
-
-# Set environment
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-ENV PATH=$PATH:/root/.sdkman/candidates/gradle/current/bin
-
-# Default command
-CMD ["/bin/bash"]
-
---------------------------------
-.PHONY: run check clean
-
-# Run script inside Docker
-run:
-	docker build -t sql-checker .
-	docker run -it --rm -v $$PWD:/app sql-checker bash script/sql_index_checker/check_sql_diff.sh
-
-# Run check script without Docker
-check:
-	bash script/sql_index_checker/check_sql_diff.sh
-
-# Cleanup logs
-clean:
-	rm -f feature_sql.log master_sql.log diff_sql.log
-
------------------------------------
-Docker ile çalıştırmak için:
-make run
-
-Normal çalıştırmak için (sistemde Python, Java, Gradle yüklü olmalı):
-make check
-
-Log temizliği için:
-make clean
-
+    # Print result table
+    print(f"{'Index Name':30} | {'Table':15} | {'Columns':20} | {'Type':13} | {'Status':10} | {'Created In':20} | {'Dropped In':20}")
+    print("-" * 140)
+    for info in indexes.values():
+        status = "Dropped" if info['dropped_in'] else "Active"
+        print(f"{info['index_name']:30} | {info['table']:15} | {info['columns']:20} | {info['type']:13} | {status:10} | {info['created_in']:20} | {info['dropped_in'] or '-':20}")
