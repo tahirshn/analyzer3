@@ -18,6 +18,11 @@ pk_inline_pattern = re.compile(
     re.IGNORECASE | re.DOTALL
 )
 
+pk_column_constraint_pattern = re.compile(
+    r'(\w+)\s+.*?\sPRIMARY\s+KEY\b',
+    re.IGNORECASE | re.DOTALL
+)
+
 alter_add_pk_pattern = re.compile(
     r'ALTER\s+TABLE\s+([^\s]+)\s+ADD\s+(CONSTRAINT\s+([^\s]+)\s+)?PRIMARY\s+KEY\s*\(([^)]+)\)',
     re.IGNORECASE | re.DOTALL
@@ -81,10 +86,33 @@ def analyze_indexes_and_primary_keys(sql_directory: str):
                                 'dropped_in': None,
                             }
 
-                        # PRIMARY KEY inline (in CREATE TABLE)
+                        # PRIMARY KEY detection - three cases:
+                        # 1. Column constraint (column_name type PRIMARY KEY)
+                        # 2. Inline table constraint (PRIMARY KEY (columns))
+                        # 3. ALTER TABLE ADD PRIMARY KEY
+
+                        # Case 1: Column constraint (request_id varchar(255) PRIMARY KEY)
+                        if "CREATE TABLE" in statement_clean:
+                            # Find all column definitions with PRIMARY KEY constraint
+                            column_pk_matches = pk_column_constraint_pattern.finditer(statement_clean)
+                            for match in column_pk_matches:
+                                column_name = match.group(1)
+                                # Try to extract table name
+                                table_match = re.search(r'CREATE\s+TABLE\s+([^\s(]+)', statement_clean, re.IGNORECASE)
+                                table_name = table_match.group(1) if table_match else '?'
+                                index_name = f"{table_name}_pkey"
+                                indexes[index_name] = {
+                                    'index_name': index_name,
+                                    'table': table_name,
+                                    'columns': column_name,
+                                    'type': 'PRIMARY KEY (column)',
+                                    'created_in': file,
+                                    'dropped_in': None,
+                                }
+
+                        # Case 2: Inline table constraint (PRIMARY KEY (columns))
                         pk_inline = pk_inline_pattern.search(statement_clean)
                         if pk_inline and "ALTER TABLE" not in statement_clean and "CREATE TABLE" in statement_clean:
-                            # Try to extract table name from CREATE TABLE statement
                             table_match = re.search(r'CREATE\s+TABLE\s+([^\s(]+)', statement_clean, re.IGNORECASE)
                             table_name = table_match.group(1) if table_match else '?'
                             columns = pk_inline.group(1).replace(" ", "")
@@ -93,12 +121,12 @@ def analyze_indexes_and_primary_keys(sql_directory: str):
                                 'index_name': index_name,
                                 'table': table_name,
                                 'columns': columns,
-                                'type': 'PRIMARY KEY',
+                                'type': 'PRIMARY KEY (table)',
                                 'created_in': file,
                                 'dropped_in': None,
                             }
 
-                        # ALTER TABLE ADD PRIMARY KEY (with or without CONSTRAINT name)
+                        # Case 3: ALTER TABLE ADD PRIMARY KEY (with or without CONSTRAINT name)
                         alter_add_pk = alter_add_pk_pattern.search(statement_clean)
                         if alter_add_pk:
                             table_name = alter_add_pk.group(1)
@@ -108,7 +136,7 @@ def analyze_indexes_and_primary_keys(sql_directory: str):
                                 'index_name': constraint_name,
                                 'table': table_name,
                                 'columns': columns,
-                                'type': 'PRIMARY KEY',
+                                'type': 'PRIMARY KEY (alter)',
                                 'created_in': file,
                                 'dropped_in': None,
                             }
